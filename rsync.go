@@ -69,12 +69,12 @@ func recurseDir(dir string, onFile onFileCb) error {
 		return err
 	}
 	for _, file := range entries {
-		childDir := path.Join(dir, file.Name())
+		childFile := path.Join(dir, file.Name())
 		if file.IsDir() {
-			if err := recurseDir(childDir, onFile); err != nil {
+			if err := recurseDir(childFile, onFile); err != nil {
 				return err
 			}
-		} else if err := onFile(childDir, file); err != nil {
+		} else if err := onFile(childFile, file); err != nil {
 			return err
 		}
 	}
