@@ -37,7 +37,7 @@ func TestGetAdler32(t *testing.T) {
 }
 
 func TestGetMD4Checksum(t *testing.T) {
-	checksum := []byte(getMD4Checksum([]byte("test")))
+	checksum := getMD4Checksum([]byte("test"))
 	wanted := []byte{219, 52, 109, 105, 29, 122, 204, 77, 194, 98, 93, 177, 159, 158, 63, 82}
 	if !bytes.Equal(checksum, wanted) {
 		t.Errorf("got %v, wanted %v", checksum, wanted)
@@ -169,13 +169,13 @@ func TestGetFilesChecksums(t *testing.T) {
 		t.Error(err)
 	}
 
-	md41 := string([]byte{230, 31, 121, 104, 154, 113, 88, 28, 63, 182, 52, 55, 149, 233, 146, 150})
-	if err := CompareSlice(checksums[0].md4, []string{md41}); err != nil {
+	md41 := []byte{230, 31, 121, 104, 154, 113, 88, 28, 63, 182, 52, 55, 149, 233, 146, 150}
+	if err := CompareSlice(checksums[0].md4[0], md41); err != nil {
 		t.Error(err)
 	}
 
-	md42 := string([]byte{42, 82, 130, 153, 200, 59, 194, 84, 26, 55, 216, 201, 124, 246, 8, 236})
-	if err := CompareSlice(checksums[1].md4, []string{md42}); err != nil {
+	md42 := []byte{42, 82, 130, 153, 200, 59, 194, 84, 26, 55, 216, 201, 124, 246, 8, 236}
+	if err := CompareSlice(checksums[1].md4[0], md42); err != nil {
 		t.Error(err)
 	}
 }

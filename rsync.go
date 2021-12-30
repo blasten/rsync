@@ -5,7 +5,7 @@
 package rsync
 
 import (
-	"encoding/gob"
+	"encoding/binary"
 	"fmt"
 	"hash/adler32"
 	"io"
@@ -25,15 +25,15 @@ func getAdler32(block []byte) uint32 {
 	return h.Sum32()
 }
 
-func getMD4Checksum(block []byte) string {
+func getMD4Checksum(block []byte) []byte {
 	h := md4.New()
 	h.Write(block)
-	return string(h.Sum(nil))
+	return h.Sum(nil)
 }
 
 type fileChecksums struct {
 	adler32 []uint32
-	md4     []string
+	md4     [][]byte
 }
 
 func getFileChecksums(fcontent []byte, blockSize int) *fileChecksums {
@@ -41,7 +41,7 @@ func getFileChecksums(fcontent []byte, blockSize int) *fileChecksums {
 	maxBlocks := int(math.Ceil(float64(flen) / float64(blockSize)))
 	checksums := &fileChecksums{
 		make([]uint32, maxBlocks),
-		make([]string, maxBlocks),
+		make([][]byte, maxBlocks),
 	}
 	for blockIdx := 0; blockIdx < maxBlocks; blockIdx++ {
 		start := blockIdx * blockSize
@@ -93,6 +93,23 @@ func getFilesChecksums(files []string, blockSize int) ([]*fileChecksums, error) 
 	return checksums, nil
 }
 
+const (
+	blockSize       uint32 = 100
+	protocolVersion byte   = 1
+)
+
+type sqType byte
+
+const (
+	version sqType = iota
+	hash
+	blockContent
+)
+
+func decodeUint32(bytes []byte) uint32 {
+	return binary.LittleEndian.Uint32(bytes)
+}
+
 // Push sends to the remote peer the weak "rolling" 32-bit checksum
 // of a file's blocks contained in src directory.
 //
@@ -103,14 +120,39 @@ func getFilesChecksums(files []string, blockSize int) ([]*fileChecksums, error) 
 // Finally, the current peer transfers the requested blocks to the remote
 // peer.
 func Push(rw io.ReadWriter, src string) error {
-	dec := gob.NewDecoder(rw)
-
-	var msg message
-	err := dec.Decode(&msg)
+	files := []string{}
+	err := recurseDir(src, func(file string, entry os.DirEntry) error {
+		files = append(files, file)
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("could not decode message: %s", err.Error())
+		return fmt.Errorf("could not recurse directory: %v", err.Error())
+	}
+	checksums, err := getFilesChecksums(files, int(blockSize))
+	if err != nil {
+		return fmt.Errorf("could not get checksums for files: %v", err.Error())
 	}
 
+	header := make([]byte, 6)
+	header[0] = byte(version)
+	header[1] = protocolVersion
+	binary.LittleEndian.PutUint32(header[2:], blockSize)
+
+	if _, err := rw.Write(header); err != nil {
+		return fmt.Errorf("could not write header: %v", err.Error())
+	}
+
+	bytes := make([]byte, 21)
+	for _, checksums := range checksums {
+		for idx := range checksums.md4 {
+			bytes[0] = byte(hash)
+			binary.LittleEndian.PutUint32(bytes[1:5], checksums.adler32[idx])
+			copy(bytes[5:], checksums.md4[idx])
+			if _, err := rw.Write(bytes); err != nil {
+				return fmt.Errorf("could not write hash: %v", err.Error())
+			}
+		}
+	}
 	return nil
 }
 
