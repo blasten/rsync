@@ -7,8 +7,10 @@ package rsync
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path"
+	"sync"
 	"testing"
 )
 
@@ -184,39 +186,45 @@ func TestGetFilesChecksums(t *testing.T) {
 	}
 }
 
-func TestPush(t *testing.T) {
-	dir, err := os.MkdirTemp(os.TempDir(), "test")
+func TestPushPull(t *testing.T) {
+	src, err := os.MkdirTemp(os.TempDir(), "src")
 	if err != nil {
 		t.Error(err)
 	}
-	defer os.RemoveAll(dir)
+	defer os.RemoveAll(src)
 
-	{
-		f, err := os.Create(path.Join(dir, "file1"))
-		if err != nil {
+	f, err := os.Create(path.Join(src, "file1"))
+	if err != nil {
+		t.Error(err)
+	}
+	f.WriteString("content of file 1")
+
+	dest, err := os.MkdirTemp(os.TempDir(), "dest")
+	if err != nil {
+		t.Error(err)
+	}
+	defer os.RemoveAll(dest)
+
+	peer1r, peer1w := io.Pipe()
+	peer2r, peer2w := io.Pipe()
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		if err := push(peer2r, peer1w, src); err != nil {
 			t.Error(err)
 		}
-		f.WriteString("content of file 1")
-	}
+		wg.Done()
+	}()
 
-	buf := bytes.NewBuffer([]byte{})
+	wg.Add(1)
+	go func() {
+		if err := pull(peer1r, peer2w, dest, 10); err != nil {
+			t.Error(err)
+		}
+		wg.Done()
+	}()
 
-	err = push(buf, dir, 10)
-	if err != nil {
-		t.Error(err)
-	}
-
-	actual := buf.Bytes()
-	expected := []byte{
-		protocolVersion,
-		/*blockSize = 10*/ 10, 0, 0, 0,
-		/*hashes = 2*/ 2, 0, 0, 0,
-		/*adler32[0]=*/ 241, 3, 99, 22,
-		/*md4[0]=*/ 19, 46, 229, 154, 113, 4, 208, 200, 104, 44, 103, 9, 182, 16, 78, 108,
-		/*adler32[1]=*/ 18, 2, 168, 8,
-		/*md4[1]=*/ 133, 192, 106, 241, 146, 178, 238, 48, 118, 201, 228, 92, 172, 165, 224, 133,
-	}
-	if !bytes.Equal(actual, expected) {
-		t.Errorf("unexpected bytes. expected: %v actual: %v", expected, actual)
-	}
+	wg.Wait()
 }

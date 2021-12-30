@@ -113,49 +113,44 @@ const (
 	protocolVersion byte   = 1
 )
 
-type sqType byte
+type OpCode byte
 
 const (
-	version sqType = iota
-	hash
-	blockContent
+	syncOp OpCode = iota
 )
 
 func decodeUint32(bytes []byte) uint32 {
 	return binary.LittleEndian.Uint32(bytes)
 }
 
-func push(rw io.ReadWriter, src string, blockSize uint32) error {
-	files := []string{}
-	err := recurseDir(src, func(file string, entry os.DirEntry) error {
-		files = append(files, file)
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("could not recurse directory: %v", err.Error())
-	}
-	fChecksums, err := getFilesChecksums(files, int(blockSize))
-	if err != nil {
-		return fmt.Errorf("could not get checksums for files: %v", err.Error())
+func push(r io.Reader, w io.Writer, src string) error {
+	if _, err := w.Write([]byte{byte(syncOp)}); err != nil {
+		return fmt.Errorf("could not send sync operation: %v", err.Error())
 	}
 
-	header := make([]byte, 9)
-	header[0] = protocolVersion
-	binary.LittleEndian.PutUint32(header[1:5], blockSize)
-	binary.LittleEndian.PutUint32(header[5:9], uint32(fChecksums.checksumsCount))
-
-	if _, err := rw.Write(header); err != nil {
-		return fmt.Errorf("could not write header: %v", err.Error())
+	rHeader := make([]byte, 9)
+	if _, err := r.Read(rHeader); err != nil {
+		return fmt.Errorf("could not read header: %v", err.Error())
 	}
 
-	bytes := make([]byte, 20)
-	for _, checksums := range fChecksums.checksums {
-		for idx := range checksums.md4 {
-			binary.LittleEndian.PutUint32(bytes[:4], checksums.adler32[idx])
-			copy(bytes[4:], checksums.md4[idx])
-			if _, err := rw.Write(bytes); err != nil {
-				return fmt.Errorf("could not write hash: %v", err.Error())
-			}
+	if rVersion := rHeader[0]; rVersion != protocolVersion {
+		return fmt.Errorf(
+			"remote uses a different version: %d, the local version is: %d",
+			rVersion,
+			protocolVersion,
+		)
+	}
+
+	rBlockSize := binary.LittleEndian.Uint32(rHeader[1:5])
+	if rBlockSize == 0 {
+		return fmt.Errorf("remote cannot use block size of zero bytes")
+	}
+
+	rChecksums := binary.LittleEndian.Uint32(rHeader[5:9])
+	rHash := make([]byte, 20)
+	for i := uint32(0); i < rChecksums; i++ {
+		if _, err := r.Read(rHash); err != nil {
+			return fmt.Errorf("could not read remote hash: %v, for index: %d", err.Error(), i)
 		}
 	}
 	return nil
@@ -171,7 +166,53 @@ func push(rw io.ReadWriter, src string, blockSize uint32) error {
 // Finally, the current peer transfers the requested blocks to the remote
 // peer.
 func Push(rw io.ReadWriter, src string) error {
-	return push(rw, src, blockSize)
+	return push(rw, rw, src)
+}
+
+func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
+	rHeader := make([]byte, 1)
+
+	if _, err := r.Read(rHeader); err != nil {
+		return fmt.Errorf("could not read remote headers: %v", err.Error())
+	}
+
+	if rHeader[0] != byte(syncOp) {
+		return fmt.Errorf("unexpected operation: %v", rHeader[0])
+	}
+
+	lFiles := []string{}
+	err := recurseDir(src, func(file string, entry os.DirEntry) error {
+		lFiles = append(lFiles, file)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("could not recurse directory: %v", err.Error())
+	}
+	lChecksums, err := getFilesChecksums(lFiles, int(lBlockSize))
+	if err != nil {
+		return fmt.Errorf("could not get checksums for files: %v", err.Error())
+	}
+
+	lHeader := make([]byte, 9)
+	lHeader[0] = protocolVersion
+	binary.LittleEndian.PutUint32(lHeader[1:5], lBlockSize)
+	binary.LittleEndian.PutUint32(lHeader[5:9], uint32(lChecksums.checksumsCount))
+
+	if _, err := w.Write(lHeader); err != nil {
+		return fmt.Errorf("could not write header: %v", err.Error())
+	}
+
+	bytes := make([]byte, 20)
+	for _, checksums := range lChecksums.checksums {
+		for idx := range checksums.md4 {
+			binary.LittleEndian.PutUint32(bytes[:4], checksums.adler32[idx])
+			copy(bytes[4:], checksums.md4[idx])
+			if _, err := w.Write(bytes); err != nil {
+				return fmt.Errorf("could not write hash: %v", err.Error())
+			}
+		}
+	}
+	return nil
 }
 
 // Pull retrieves the weak "rolling" 32-bit checksum of the file's blocks
@@ -183,5 +224,5 @@ func Push(rw io.ReadWriter, src string) error {
 //
 // Finally, the current peer writes the blocks to disk.
 func Pull(rw io.ReadWriter, dest string) error {
-	return nil
+	return pull(rw, rw, dest, blockSize)
 }
