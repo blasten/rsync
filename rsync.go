@@ -6,6 +6,7 @@ package rsync
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/adler32"
 	"io"
@@ -81,20 +82,34 @@ func recurseDir(dir string, onFile onFileCb) error {
 	return nil
 }
 
-func getFilesChecksums(files []string, blockSize int) ([]*fileChecksums, error) {
+type filesChecksums struct {
+	checksums      []*fileChecksums
+	checksumsCount int
+}
+
+func getFilesChecksums(files []string, blockSize int) (*filesChecksums, error) {
 	checksums := make([]*fileChecksums, len(files))
+	checksumsCount := 0
+
 	for i, file := range files {
 		c, err := os.ReadFile(file)
 		if err != nil {
-			return checksums, err
+			return nil, err
 		}
 		checksums[i] = getFileChecksums(c, blockSize)
+		if len(checksums[i].adler32) != len(checksums[i].md4) {
+			return nil, errors.New("invalid state: expected same number of hashes")
+		}
+		checksumsCount += len(checksums[i].adler32)
 	}
-	return checksums, nil
+	return &filesChecksums{
+		checksums:      checksums,
+		checksumsCount: checksumsCount,
+	}, nil
 }
 
 const (
-	blockSize       uint32 = 100
+	blockSize       uint32 = 1000
 	protocolVersion byte   = 1
 )
 
@@ -110,6 +125,42 @@ func decodeUint32(bytes []byte) uint32 {
 	return binary.LittleEndian.Uint32(bytes)
 }
 
+func push(rw io.ReadWriter, src string, blockSize uint32) error {
+	files := []string{}
+	err := recurseDir(src, func(file string, entry os.DirEntry) error {
+		files = append(files, file)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("could not recurse directory: %v", err.Error())
+	}
+	fChecksums, err := getFilesChecksums(files, int(blockSize))
+	if err != nil {
+		return fmt.Errorf("could not get checksums for files: %v", err.Error())
+	}
+
+	header := make([]byte, 9)
+	header[0] = protocolVersion
+	binary.LittleEndian.PutUint32(header[1:5], blockSize)
+	binary.LittleEndian.PutUint32(header[5:9], uint32(fChecksums.checksumsCount))
+
+	if _, err := rw.Write(header); err != nil {
+		return fmt.Errorf("could not write header: %v", err.Error())
+	}
+
+	bytes := make([]byte, 20)
+	for _, checksums := range fChecksums.checksums {
+		for idx := range checksums.md4 {
+			binary.LittleEndian.PutUint32(bytes[:4], checksums.adler32[idx])
+			copy(bytes[4:], checksums.md4[idx])
+			if _, err := rw.Write(bytes); err != nil {
+				return fmt.Errorf("could not write hash: %v", err.Error())
+			}
+		}
+	}
+	return nil
+}
+
 // Push sends to the remote peer the weak "rolling" 32-bit checksum
 // of a file's blocks contained in src directory.
 //
@@ -120,40 +171,7 @@ func decodeUint32(bytes []byte) uint32 {
 // Finally, the current peer transfers the requested blocks to the remote
 // peer.
 func Push(rw io.ReadWriter, src string) error {
-	files := []string{}
-	err := recurseDir(src, func(file string, entry os.DirEntry) error {
-		files = append(files, file)
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("could not recurse directory: %v", err.Error())
-	}
-	checksums, err := getFilesChecksums(files, int(blockSize))
-	if err != nil {
-		return fmt.Errorf("could not get checksums for files: %v", err.Error())
-	}
-
-	header := make([]byte, 6)
-	header[0] = byte(version)
-	header[1] = protocolVersion
-	binary.LittleEndian.PutUint32(header[2:], blockSize)
-
-	if _, err := rw.Write(header); err != nil {
-		return fmt.Errorf("could not write header: %v", err.Error())
-	}
-
-	bytes := make([]byte, 21)
-	for _, checksums := range checksums {
-		for idx := range checksums.md4 {
-			bytes[0] = byte(hash)
-			binary.LittleEndian.PutUint32(bytes[1:5], checksums.adler32[idx])
-			copy(bytes[5:], checksums.md4[idx])
-			if _, err := rw.Write(bytes); err != nil {
-				return fmt.Errorf("could not write hash: %v", err.Error())
-			}
-		}
-	}
-	return nil
+	return push(rw, src, blockSize)
 }
 
 // Pull retrieves the weak "rolling" 32-bit checksum of the file's blocks

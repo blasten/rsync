@@ -148,7 +148,7 @@ func TestGetFilesChecksums(t *testing.T) {
 		f.WriteString("content of file 2")
 	}
 
-	checksums, err := getFilesChecksums([]string{
+	fChecksums, err := getFilesChecksums([]string{
 		path.Join(dir, "file1"),
 		path.Join(dir, "file2"),
 	}, 50)
@@ -157,25 +157,66 @@ func TestGetFilesChecksums(t *testing.T) {
 		t.Error(err)
 	}
 
-	if got, wanted := len(checksums), 2; got != wanted {
+	if got, wanted := len(fChecksums.checksums), 2; got != wanted {
 		t.Errorf("got %v, wanted %v", got, wanted)
 	}
 
-	if err := CompareSlice(checksums[0].adler32, []uint32{983238146}); err != nil {
+	if got, wanted := fChecksums.checksumsCount, 2; got != wanted {
+		t.Errorf("got %v, wanted %v", got, wanted)
+	}
+
+	if err := CompareSlice(fChecksums.checksums[0].adler32, []uint32{983238146}); err != nil {
 		t.Error(err)
 	}
 
-	if err := CompareSlice(checksums[1].adler32, []uint32{983303683}); err != nil {
+	if err := CompareSlice(fChecksums.checksums[1].adler32, []uint32{983303683}); err != nil {
 		t.Error(err)
 	}
 
 	md41 := []byte{230, 31, 121, 104, 154, 113, 88, 28, 63, 182, 52, 55, 149, 233, 146, 150}
-	if !bytes.Equal(checksums[0].md4[0], md41) {
+	if !bytes.Equal(fChecksums.checksums[0].md4[0], md41) {
 		t.Error(err)
 	}
 
 	md42 := []byte{42, 82, 130, 153, 200, 59, 194, 84, 26, 55, 216, 201, 124, 246, 8, 236}
-	if !bytes.Equal(checksums[1].md4[0], md42) {
+	if !bytes.Equal(fChecksums.checksums[1].md4[0], md42) {
 		t.Error(err)
+	}
+}
+
+func TestPush(t *testing.T) {
+	dir, err := os.MkdirTemp(os.TempDir(), "test")
+	if err != nil {
+		t.Error(err)
+	}
+	defer os.RemoveAll(dir)
+
+	{
+		f, err := os.Create(path.Join(dir, "file1"))
+		if err != nil {
+			t.Error(err)
+		}
+		f.WriteString("content of file 1")
+	}
+
+	buf := bytes.NewBuffer([]byte{})
+
+	err = push(buf, dir, 10)
+	if err != nil {
+		t.Error(err)
+	}
+
+	actual := buf.Bytes()
+	expected := []byte{
+		protocolVersion,
+		/*blockSize = 10*/ 10, 0, 0, 0,
+		/*hashes = 2*/ 2, 0, 0, 0,
+		/*adler32[0]=*/ 241, 3, 99, 22,
+		/*md4[0]=*/ 19, 46, 229, 154, 113, 4, 208, 200, 104, 44, 103, 9, 182, 16, 78, 108,
+		/*adler32[1]=*/ 18, 2, 168, 8,
+		/*md4[1]=*/ 133, 192, 106, 241, 146, 178, 238, 48, 118, 201, 228, 92, 172, 165, 224, 133,
+	}
+	if !bytes.Equal(actual, expected) {
+		t.Errorf("unexpected bytes. expected: %v actual: %v", expected, actual)
 	}
 }
