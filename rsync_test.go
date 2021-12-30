@@ -170,12 +170,12 @@ func TestGetFilesChecksums(t *testing.T) {
 	}
 
 	md41 := []byte{230, 31, 121, 104, 154, 113, 88, 28, 63, 182, 52, 55, 149, 233, 146, 150}
-	if err := CompareSlice(checksums[0].md4[0], md41); err != nil {
+	if !bytes.Equal(checksums[0].md4[0], md41) {
 		t.Error(err)
 	}
 
 	md42 := []byte{42, 82, 130, 153, 200, 59, 194, 84, 26, 55, 216, 201, 124, 246, 8, 236}
-	if err := CompareSlice(checksums[1].md4[0], md42); err != nil {
+	if !bytes.Equal(checksums[1].md4[0], md42) {
 		t.Error(err)
 	}
 }
