@@ -33,8 +33,8 @@ func getMD4Checksum(block []byte) []byte {
 }
 
 type fileChecksums struct {
-	adler32 []uint32
-	md4     [][]byte
+	weak   []uint32
+	strong [][]byte
 }
 
 func getFileChecksums(fcontent []byte, blockSize int) *fileChecksums {
@@ -50,8 +50,8 @@ func getFileChecksums(fcontent []byte, blockSize int) *fileChecksums {
 		if end > flen {
 			end = flen
 		}
-		checksums.adler32[blockIdx] = getAdler32(fcontent[start:end])
-		checksums.md4[blockIdx] = getMD4Checksum(fcontent[start:end])
+		checksums.weak[blockIdx] = getAdler32(fcontent[start:end])
+		checksums.strong[blockIdx] = getMD4Checksum(fcontent[start:end])
 	}
 	return checksums
 }
@@ -97,10 +97,10 @@ func getFilesChecksums(files []string, blockSize int) (*filesChecksums, error) {
 			return nil, err
 		}
 		checksums[i] = getFileChecksums(c, blockSize)
-		if len(checksums[i].adler32) != len(checksums[i].md4) {
-			return nil, errors.New("invalid state: expected same number of hashes")
+		if len(checksums[i].weak) != len(checksums[i].strong) {
+			return nil, errors.New("invalid state: expected same number of checksums")
 		}
-		checksumsCount += len(checksums[i].adler32)
+		checksumsCount += len(checksums[i].weak)
 	}
 	return &filesChecksums{
 		checksums:      checksums,
@@ -200,9 +200,9 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 
 	bytes := make([]byte, 20)
 	for _, checksums := range lChecksums.checksums {
-		for idx := range checksums.md4 {
-			binary.LittleEndian.PutUint32(bytes[:4], checksums.adler32[idx])
-			copy(bytes[4:], checksums.md4[idx])
+		for idx := range checksums.strong {
+			binary.LittleEndian.PutUint32(bytes[:4], checksums.weak[idx])
+			copy(bytes[4:], checksums.strong[idx])
 			if _, err := w.Write(bytes); err != nil {
 				return fmt.Errorf("could not write hash: %v", err.Error())
 			}
