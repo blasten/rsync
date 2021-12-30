@@ -119,10 +119,6 @@ const (
 	syncOp OpCode = iota
 )
 
-func decodeUint32(bytes []byte) uint32 {
-	return binary.LittleEndian.Uint32(bytes)
-}
-
 func push(r io.Reader, w io.Writer, src string) error {
 	if _, err := w.Write([]byte{byte(syncOp)}); err != nil {
 		return fmt.Errorf("could not send sync operation: %v", err.Error())
