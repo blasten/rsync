@@ -5,7 +5,6 @@
 package rsync
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -13,37 +12,67 @@ import (
 	"path"
 )
 
-type message struct {
+// Push sends to the remote peer the weak "rolling" 32-bit checksum
+// of a file's blocks contained in src directory.
+//
+// These checksums are then used by the remote peer to determine what
+// file blocks must be sent by the current peer in order to syncronize
+// the src directory.
+//
+// Finally, the current peer transfers the requested blocks to the remote
+// peer.
+func Push(rw io.ReadWriter, src string) error {
+	return push(rw, rw, src)
 }
 
-type fileChecksums struct {
-	weak   []uint32
-	strong [][]byte
+// Pull retrieves the weak "rolling" 32-bit checksum of the file's blocks
+// contained in the remote peer's src directory.
+//
+// It then scans the dest directory, and finds the minimal set of file blocks
+// that must be sent by the remote peer in order to syncronize the src
+// directory in the current peer.
+//
+// Finally, the current peer writes the blocks to disk.
+func Pull(rw io.ReadWriter, dest string) error {
+	return pull(rw, rw, dest, blockSize)
 }
 
-func getFileChecksums(fcontent []byte, blockSize int) *fileChecksums {
+// A block represents a non-overlapping fixed-sized sequence of S bytes
+// in a file.
+// S is the block size.
+type block struct {
+	// weak rolling checksum that uses adler-32.
+	weak uint32
+	// strong checksum that uses MD4.
+	strong []byte
+}
+
+func getFileBlocks(filename string, fcontent []byte, blockSize int) []*block {
 	flen := len(fcontent)
 	maxBlocks := int(math.Ceil(float64(flen) / float64(blockSize)))
-	checksums := &fileChecksums{
-		make([]uint32, maxBlocks),
-		make([][]byte, maxBlocks),
-	}
+	blocks := make([]*block, maxBlocks)
 	for blockIdx := 0; blockIdx < maxBlocks; blockIdx++ {
 		start := blockIdx * blockSize
 		end := (blockIdx + 1) * blockSize
 		if end > flen {
 			end = flen
 		}
-		checksums.weak[blockIdx] = getAdler32(fcontent[start:end])
-		checksums.strong[blockIdx] = getMD4Checksum(fcontent[start:end])
+		blocks[blockIdx] = &block{
+			weak:   getAdler32(fcontent[start:end]),
+			strong: getMD4Checksum(fcontent[start:end]),
+		}
 	}
-	return checksums
+	return blocks
 }
 
 type onFileCb = func(string, os.DirEntry) error
 
-func recurseDir(dir string, onFile onFileCb) error {
-	f, err := os.Open(dir)
+func recurseDir(base string, onFile onFileCb) error {
+	return recurseDirWithRelDir(base, "", onFile)
+}
+
+func recurseDirWithRelDir(base string, relDir string, onFile onFileCb) error {
+	f, err := os.Open(path.Join(base, relDir))
 	if err != nil {
 		return err
 	}
@@ -54,42 +83,45 @@ func recurseDir(dir string, onFile onFileCb) error {
 		return err
 	}
 	for _, file := range entries {
-		childFile := path.Join(dir, file.Name())
+		nextRelDir := path.Join(relDir, file.Name())
 		if file.IsDir() {
-			if err := recurseDir(childFile, onFile); err != nil {
+			if err := recurseDirWithRelDir(base, nextRelDir, onFile); err != nil {
 				return err
 			}
-		} else if err := onFile(childFile, file); err != nil {
+		} else if err := onFile(nextRelDir, file); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-type filesChecksums struct {
-	checksums      []*fileChecksums
-	checksumsCount int
+type filename string
+type blockRange [2]int
+
+type fsBlocks struct {
+	blocks []*block
+	files  map[filename]blockRange
 }
 
-func getFilesChecksums(files []string, blockSize int) (*filesChecksums, error) {
-	checksums := make([]*fileChecksums, len(files))
-	checksumsCount := 0
-
-	for i, file := range files {
+func getBlocks(basedir string, files []string, blockSize int) (*fsBlocks, error) {
+	allBlocks := fsBlocks{
+		blocks: []*block{},
+		files:  make(map[filename]blockRange),
+	}
+	for _, relfile := range files {
+		file := path.Join(basedir, relfile)
 		c, err := os.ReadFile(file)
 		if err != nil {
 			return nil, err
 		}
-		checksums[i] = getFileChecksums(c, blockSize)
-		if len(checksums[i].weak) != len(checksums[i].strong) {
-			return nil, errors.New("invalid state: expected same number of checksums")
+		fileBlocks := getFileBlocks(relfile, c, blockSize)
+		allBlocks.files[filename(relfile)] = blockRange{
+			len(allBlocks.blocks),
+			len(fileBlocks),
 		}
-		checksumsCount += len(checksums[i].weak)
+		allBlocks.blocks = append(allBlocks.blocks, fileBlocks...)
 	}
-	return &filesChecksums{
-		checksums:      checksums,
-		checksumsCount: checksumsCount,
-	}, nil
+	return &allBlocks, nil
 }
 
 const (
@@ -125,34 +157,35 @@ func push(r io.Reader, w io.Writer, src string) error {
 	if rBlockSize == 0 {
 		return fmt.Errorf("remote cannot use block size of zero bytes")
 	}
-	checksumsCount, err := readUint32(r)
+	blockCount, err := readUint32(r)
 	if err != nil {
 		return fmt.Errorf("could not get checksum count from remote: %v", err.Error())
 	}
-	strongChecksum := make([]byte, 16)
-	for i := uint32(0); i < checksumsCount; i++ {
-		_, err := readUint32(r)
+
+	blocks := make(map[uint16][]*block)
+
+	for i := uint32(0); i < blockCount; i++ {
+		rollingChecksum, err := readUint32(r)
 		if err != nil {
-			return fmt.Errorf("could not read weak checksum: %v, for index: %d", err.Error(), i)
+			return fmt.Errorf("could not read rolling checksum: %v, for index: %d", err.Error(), i)
 		}
+		strongChecksum := make([]byte, 16)
 		if _, err := r.Read(strongChecksum); err != nil {
 			return fmt.Errorf("could not read strong checksum: %v, for index: %d", err.Error(), i)
 		}
+		// Use the 16-bit hash of the 32-bit rolling checksum.
+		blockKey := uint16(rollingChecksum >> 16)
+		if _, has := blocks[blockKey]; !has {
+			blocks[blockKey] = []*block{}
+		}
+		blocks[blockKey] = append(
+			blocks[blockKey],
+			&block{
+				weak:   rollingChecksum,
+				strong: strongChecksum,
+			})
 	}
 	return nil
-}
-
-// Push sends to the remote peer the weak "rolling" 32-bit checksum
-// of a file's blocks contained in src directory.
-//
-// These checksums are then used by the remote peer to determine what
-// file blocks must be sent by the current peer in order to syncronize
-// the src directory.
-//
-// Finally, the current peer transfers the requested blocks to the remote
-// peer.
-func Push(rw io.ReadWriter, src string) error {
-	return push(rw, rw, src)
 }
 
 func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
@@ -171,9 +204,9 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 	if err != nil {
 		return fmt.Errorf("could not recurse directory: %v", err.Error())
 	}
-	lChecksums, err := getFilesChecksums(lFiles, int(lBlockSize))
+	fsBlocks, err := getBlocks(src, lFiles, int(lBlockSize))
 	if err != nil {
-		return fmt.Errorf("could not get checksums for files: %v", err.Error())
+		return fmt.Errorf("could not get file metas: %v", err.Error())
 	}
 	if _, err := w.Write([]byte{protocolVersion}); err != nil {
 		return fmt.Errorf("could not write protocol version: %v", err.Error())
@@ -181,30 +214,16 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 	if err := writeUint32(lBlockSize, w); err != nil {
 		return fmt.Errorf("could not write block size: %v", err.Error())
 	}
-	if err := writeUint32(uint32(lChecksums.checksumsCount), w); err != nil {
-		return fmt.Errorf("could not write checksum count: %v", err.Error())
+	if err := writeUint32(uint32(len(fsBlocks.blocks)), w); err != nil {
+		return fmt.Errorf("could not write number of files: %v", err.Error())
 	}
-	for _, checksums := range lChecksums.checksums {
-		for idx := range checksums.strong {
-			if err := writeUint32(checksums.weak[idx], w); err != nil {
-				return fmt.Errorf("could not write weak checksum: %v", err.Error())
-			}
-			if _, err := w.Write(checksums.strong[idx]); err != nil {
-				return fmt.Errorf("could not write hash: %v", err.Error())
-			}
+	for _, block := range fsBlocks.blocks {
+		if err := writeUint32(block.weak, w); err != nil {
+			return fmt.Errorf("could not write weak checksum: %v", err.Error())
+		}
+		if _, err := w.Write(block.strong); err != nil {
+			return fmt.Errorf("could not write hash: %v", err.Error())
 		}
 	}
 	return nil
-}
-
-// Pull retrieves the weak "rolling" 32-bit checksum of the file's blocks
-// contained in the remote peer's src directory.
-//
-// It then scans the dest directory, and finds the minimal set of file blocks
-// that must be sent by the remote peer in order to syncronize the src
-// directory in the current peer.
-//
-// Finally, the current peer writes the blocks to disk.
-func Pull(rw io.ReadWriter, dest string) error {
-	return pull(rw, rw, dest, blockSize)
 }
