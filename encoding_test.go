@@ -80,6 +80,29 @@ func TestReadVarintUint32(t *testing.T) {
 	}
 }
 
+func TestWriteBytes(t *testing.T) {
+	b := bytes.NewBuffer([]byte{})
+	if err := writeBytes([]byte("hello world"), b); err != nil {
+		t.Error(err)
+	}
+	got := b.Bytes()
+	wanted := []byte{11, 104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100}
+	if !bytes.Equal(got, wanted) {
+		t.Errorf("got %v, wanted %v", got, wanted)
+	}
+}
+
+func TestReadBytes(t *testing.T) {
+	got, err := readBytes(bytes.NewBuffer([]byte{11, 104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100}))
+	if err != nil {
+		t.Error(err)
+	}
+	wanted := []byte("hello world")
+	if !bytes.Equal(got, wanted) {
+		t.Errorf("got %v, wanted %v", got, wanted)
+	}
+}
+
 func TestGetAdler32(t *testing.T) {
 	checksum := getAdler32([]byte("test"))
 	wanted := uint32(73204161)

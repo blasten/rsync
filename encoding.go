@@ -62,6 +62,30 @@ func readUint32(r io.Reader) (uint32, error) {
 	}
 }
 
+// writeBytes writes a sequence of bytes to the writer.
+func writeBytes(b []byte, w io.Writer) error {
+	if err := writeUint32(uint32(len(b)), w); err != nil {
+		return err
+	}
+	if _, err := w.Write(b); err != nil {
+		return err
+	}
+	return nil
+}
+
+// readBytes reads a sequence of bytes from the reader.
+func readBytes(r io.Reader) ([]byte, error) {
+	l, err := readUint32(r)
+	if err != nil {
+		return make([]byte, 0), err
+	}
+	b := make([]byte, l)
+	if _, err := r.Read(b); err != nil {
+		return make([]byte, 0), err
+	}
+	return b, nil
+}
+
 func getAdler32(block []byte) uint32 {
 	h := adler32.New()
 	h.Write(block)
