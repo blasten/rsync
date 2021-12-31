@@ -30,22 +30,6 @@ func CompareSlice[T comparable](a, b []T) error {
 	return nil
 }
 
-func TestGetAdler32(t *testing.T) {
-	checksum := getAdler32([]byte("test"))
-	wanted := uint32(73204161)
-	if checksum != wanted {
-		t.Errorf("got %v, wanted %v", checksum, wanted)
-	}
-}
-
-func TestGetMD4Checksum(t *testing.T) {
-	checksum := getMD4Checksum([]byte("test"))
-	wanted := []byte{219, 52, 109, 105, 29, 122, 204, 77, 194, 98, 93, 177, 159, 158, 63, 82}
-	if !bytes.Equal(checksum, wanted) {
-		t.Errorf("got %v, wanted %v", checksum, wanted)
-	}
-}
-
 func TestFileChecksums(t *testing.T) {
 	checksums := getFileChecksums([]byte{219, 52, 109, 105}, 2)
 

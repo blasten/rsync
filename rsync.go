@@ -5,31 +5,15 @@
 package rsync
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"hash/adler32"
 	"io"
 	"math"
 	"os"
 	"path"
-
-	"golang.org/x/crypto/md4"
 )
 
 type message struct {
-}
-
-func getAdler32(block []byte) uint32 {
-	h := adler32.New()
-	h.Write(block)
-	return h.Sum32()
-}
-
-func getMD4Checksum(block []byte) []byte {
-	h := md4.New()
-	h.Write(block)
-	return h.Sum(nil)
 }
 
 type fileChecksums struct {
@@ -123,12 +107,10 @@ func push(r io.Reader, w io.Writer, src string) error {
 	if _, err := w.Write([]byte{byte(syncOp)}); err != nil {
 		return fmt.Errorf("could not send sync operation: %v", err.Error())
 	}
-
-	rHeader := make([]byte, 9)
+	rHeader := make([]byte, 1)
 	if _, err := r.Read(rHeader); err != nil {
 		return fmt.Errorf("could not read header: %v", err.Error())
 	}
-
 	if rVersion := rHeader[0]; rVersion != protocolVersion {
 		return fmt.Errorf(
 			"remote uses a different version: %d, the local version is: %d",
@@ -136,17 +118,25 @@ func push(r io.Reader, w io.Writer, src string) error {
 			protocolVersion,
 		)
 	}
-
-	rBlockSize := binary.LittleEndian.Uint32(rHeader[1:5])
+	rBlockSize, err := readUint32(r)
+	if err != nil {
+		return fmt.Errorf("could not get block size from remote: %v", err.Error())
+	}
 	if rBlockSize == 0 {
 		return fmt.Errorf("remote cannot use block size of zero bytes")
 	}
-
-	rChecksums := binary.LittleEndian.Uint32(rHeader[5:9])
-	rHash := make([]byte, 20)
-	for i := uint32(0); i < rChecksums; i++ {
-		if _, err := r.Read(rHash); err != nil {
-			return fmt.Errorf("could not read remote hash: %v, for index: %d", err.Error(), i)
+	checksumsCount, err := readUint32(r)
+	if err != nil {
+		return fmt.Errorf("could not get checksum count from remote: %v", err.Error())
+	}
+	strongChecksum := make([]byte, 16)
+	for i := uint32(0); i < checksumsCount; i++ {
+		_, err := readUint32(r)
+		if err != nil {
+			return fmt.Errorf("could not read weak checksum: %v, for index: %d", err.Error(), i)
+		}
+		if _, err := r.Read(strongChecksum); err != nil {
+			return fmt.Errorf("could not read strong checksum: %v, for index: %d", err.Error(), i)
 		}
 	}
 	return nil
@@ -167,15 +157,12 @@ func Push(rw io.ReadWriter, src string) error {
 
 func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 	rHeader := make([]byte, 1)
-
 	if _, err := r.Read(rHeader); err != nil {
 		return fmt.Errorf("could not read remote headers: %v", err.Error())
 	}
-
 	if rHeader[0] != byte(syncOp) {
 		return fmt.Errorf("unexpected operation: %v", rHeader[0])
 	}
-
 	lFiles := []string{}
 	err := recurseDir(src, func(file string, entry os.DirEntry) error {
 		lFiles = append(lFiles, file)
@@ -188,22 +175,21 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 	if err != nil {
 		return fmt.Errorf("could not get checksums for files: %v", err.Error())
 	}
-
-	lHeader := make([]byte, 9)
-	lHeader[0] = protocolVersion
-	binary.LittleEndian.PutUint32(lHeader[1:5], lBlockSize)
-	binary.LittleEndian.PutUint32(lHeader[5:9], uint32(lChecksums.checksumsCount))
-
-	if _, err := w.Write(lHeader); err != nil {
-		return fmt.Errorf("could not write header: %v", err.Error())
+	if _, err := w.Write([]byte{protocolVersion}); err != nil {
+		return fmt.Errorf("could not write protocol version: %v", err.Error())
 	}
-
-	bytes := make([]byte, 20)
+	if err := writeUint32(lBlockSize, w); err != nil {
+		return fmt.Errorf("could not write block size: %v", err.Error())
+	}
+	if err := writeUint32(uint32(lChecksums.checksumsCount), w); err != nil {
+		return fmt.Errorf("could not write checksum count: %v", err.Error())
+	}
 	for _, checksums := range lChecksums.checksums {
 		for idx := range checksums.strong {
-			binary.LittleEndian.PutUint32(bytes[:4], checksums.weak[idx])
-			copy(bytes[4:], checksums.strong[idx])
-			if _, err := w.Write(bytes); err != nil {
+			if err := writeUint32(checksums.weak[idx], w); err != nil {
+				return fmt.Errorf("could not write weak checksum: %v", err.Error())
+			}
+			if _, err := w.Write(checksums.strong[idx]); err != nil {
 				return fmt.Errorf("could not write hash: %v", err.Error())
 			}
 		}
