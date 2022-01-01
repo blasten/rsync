@@ -41,37 +41,81 @@ func Pull(rw io.ReadWriter, dest string) error {
 // in a file.
 // S is the block size.
 type block struct {
-	// weak rolling checksum that uses adler-32.
+	// The index of the block relative to the other blocks in the list
+	// resulted from scanning the dest directory.
+	idx uint32
+
+	// The hashes used to identify this block.
+	hashes *blockHashes
+}
+
+type blockHashes struct {
+	// The weak rolling checksum that uses adler-32.
 	weak uint32
-	// strong checksum that uses MD4.
+
+	// The strong checksum that uses MD4.
 	strong []byte
 }
 
-func getFileBlocks(filename string, fcontent []byte, blockSize int) []*block {
-	flen := len(fcontent)
-	maxBlocks := int(math.Ceil(float64(flen) / float64(blockSize)))
-	blocks := make([]*block, maxBlocks)
-	for blockIdx := 0; blockIdx < maxBlocks; blockIdx++ {
-		start := blockIdx * blockSize
-		end := (blockIdx + 1) * blockSize
-		if end > flen {
-			end = flen
-		}
-		blocks[blockIdx] = &block{
-			weak:   getAdler32(fcontent[start:end]),
-			strong: getMD4Checksum(fcontent[start:end]),
-		}
-	}
-	return blocks
+type fsBlocks struct {
+	blocks []*blockHashes
+	files  map[filename]blockRange
 }
 
 type onFileCb = func(string, os.DirEntry) error
+type filename string
+type blockRange [2]int
+type OpCode byte
+type blockDB map[uint16][]*block
 
-func recurseDir(base string, onFile onFileCb) error {
-	return recurseDirWithRelDir(base, "", onFile)
+const (
+	blockSize       uint32 = 1000
+	protocolVersion byte   = 1
+)
+
+const (
+	syncOp OpCode = iota
+)
+
+func getFileHashes(file string, blockSize int) []*blockHashes {
+	f, err := os.Open(file)
+	if err != nil {
+		return make([]*blockHashes, 0)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return make([]*blockHashes, 0)
+	}
+
+	flen := info.Size()
+	maxBlocks := int(math.Ceil(float64(flen) / float64(blockSize)))
+	blocks := make([]*blockHashes, maxBlocks)
+
+	blockIdx := int(0)
+	b := make([]byte, blockSize)
+
+	for {
+		n, err := f.Read(b)
+		if err != nil && err != io.EOF {
+			return make([]*blockHashes, 0)
+		}
+		if n == 0 {
+			return blocks
+		}
+		blocks[blockIdx] = &blockHashes{
+			weak:   getAdler32(b[:n]),
+			strong: getMD4Checksum(b[:n]),
+		}
+		if err == io.EOF {
+			return blocks
+		}
+		blockIdx++
+	}
 }
 
-func recurseDirWithRelDir(base string, relDir string, onFile onFileCb) error {
+func recurseDir(base string, relDir string, onFile onFileCb) error {
 	f, err := os.Open(path.Join(base, relDir))
 	if err != nil {
 		return err
@@ -85,7 +129,7 @@ func recurseDirWithRelDir(base string, relDir string, onFile onFileCb) error {
 	for _, file := range entries {
 		nextRelDir := path.Join(relDir, file.Name())
 		if file.IsDir() {
-			if err := recurseDirWithRelDir(base, nextRelDir, onFile); err != nil {
+			if err := recurseDir(base, nextRelDir, onFile); err != nil {
 				return err
 			}
 		} else if err := onFile(nextRelDir, file); err != nil {
@@ -95,45 +139,53 @@ func recurseDirWithRelDir(base string, relDir string, onFile onFileCb) error {
 	return nil
 }
 
-type filename string
-type blockRange [2]int
-
-type fsBlocks struct {
-	blocks []*block
-	files  map[filename]blockRange
-}
-
 func getBlocks(basedir string, files []string, blockSize int) (*fsBlocks, error) {
 	allBlocks := fsBlocks{
-		blocks: []*block{},
+		blocks: []*blockHashes{},
 		files:  make(map[filename]blockRange),
 	}
 	for _, relfile := range files {
-		file := path.Join(basedir, relfile)
-		c, err := os.ReadFile(file)
-		if err != nil {
-			return nil, err
-		}
-		fileBlocks := getFileBlocks(relfile, c, blockSize)
+		fullFile := path.Join(basedir, relfile)
+		fileHashes := getFileHashes(fullFile, blockSize)
 		allBlocks.files[filename(relfile)] = blockRange{
 			len(allBlocks.blocks),
-			len(fileBlocks),
+			len(fileHashes),
 		}
-		allBlocks.blocks = append(allBlocks.blocks, fileBlocks...)
+		allBlocks.blocks = append(allBlocks.blocks, fileHashes...)
 	}
 	return &allBlocks, nil
 }
 
-const (
-	blockSize       uint32 = 1000
-	protocolVersion byte   = 1
-)
+func searchChecksum(base string, filenames []string, db *blockDB, blockSize uint32, w io.Writer) error {
+	for _, filename := range filenames {
+		processFile(path.Join(base, filename), db, blockSize, w)
+	}
+	return nil
+}
 
-type OpCode byte
+func processFile(file string, db *blockDB, blockSize uint32, w io.Writer) error {
+	f, err := os.Open(file)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
 
-const (
-	syncOp OpCode = iota
-)
+	// if err := writeBytes([]byte(file), w); err != nil {
+	// 	return err
+	// }
+	b := make([]byte, blockSize)
+	n, err := f.Read(b)
+	if n == 0 || err == io.EOF {
+		return nil
+	}
+	singleByte := make([]byte, 1)
+	for {
+		n, err := f.Read(singleByte)
+		if n == 0 || err == io.EOF {
+			return nil
+		}
+	}
+}
 
 func push(r io.Reader, w io.Writer, src string) error {
 	if _, err := w.Write([]byte{byte(syncOp)}); err != nil {
@@ -162,18 +214,18 @@ func push(r io.Reader, w io.Writer, src string) error {
 		return fmt.Errorf("could not get checksum count from remote: %v", err.Error())
 	}
 
-	blocks := make(map[uint16][]*block)
-
-	for i := uint32(0); i < blockCount; i++ {
+	blocks := make(blockDB, blockCount)
+	for idx := uint32(0); idx < blockCount; idx++ {
 		rollingChecksum, err := readUint32(r)
 		if err != nil {
-			return fmt.Errorf("could not read rolling checksum: %v, for index: %d", err.Error(), i)
+			return fmt.Errorf("could not read rolling checksum: %v, for index: %d", err.Error(), idx)
 		}
 		strongChecksum := make([]byte, 16)
 		if _, err := r.Read(strongChecksum); err != nil {
-			return fmt.Errorf("could not read strong checksum: %v, for index: %d", err.Error(), i)
+			return fmt.Errorf("could not read strong checksum: %v, for index: %d", err.Error(), idx)
 		}
-		// Use the 16-bit hash of the 32-bit rolling checksum.
+		// Use the 16-bit hash of the 32-bit rolling checksum as the key of the map.
+		// The 16-bit hash is cheaper to compute than the 32-bit hash.
 		blockKey := uint16(rollingChecksum >> 16)
 		if _, has := blocks[blockKey]; !has {
 			blocks[blockKey] = []*block{}
@@ -181,9 +233,24 @@ func push(r io.Reader, w io.Writer, src string) error {
 		blocks[blockKey] = append(
 			blocks[blockKey],
 			&block{
-				weak:   rollingChecksum,
-				strong: strongChecksum,
+				idx: idx,
+				hashes: &blockHashes{
+					weak:   rollingChecksum,
+					strong: strongChecksum,
+				},
 			})
+	}
+	lFiles := []string{}
+	err = recurseDir(src, "", func(file string, entry os.DirEntry) error {
+		lFiles = append(lFiles, file)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("could not scan directory: %v", err.Error())
+	}
+	err = searchChecksum(src, lFiles, &blocks, rBlockSize, w)
+	if err != nil {
+		return fmt.Errorf("could not determine checksums: %v", err.Error())
 	}
 	return nil
 }
@@ -197,12 +264,12 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 		return fmt.Errorf("unexpected operation: %v", rHeader[0])
 	}
 	lFiles := []string{}
-	err := recurseDir(src, func(file string, entry os.DirEntry) error {
+	err := recurseDir(src, "", func(file string, entry os.DirEntry) error {
 		lFiles = append(lFiles, file)
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("could not recurse directory: %v", err.Error())
+		return fmt.Errorf("could not scan directory: %v", err.Error())
 	}
 	fsBlocks, err := getBlocks(src, lFiles, int(lBlockSize))
 	if err != nil {

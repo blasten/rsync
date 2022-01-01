@@ -5,7 +5,6 @@
 package rsync
 
 import (
-	"hash/adler32"
 	"io"
 
 	"golang.org/x/crypto/md4"
@@ -86,10 +85,26 @@ func readBytes(r io.Reader) ([]byte, error) {
 	return b, nil
 }
 
+const adler32mod = 65521
+
+func getAdler32Sums(block []byte) (s1 uint32, s2 uint32) {
+	s1 = 1
+	for _, b := range block {
+		s1 = (s1 + uint32(b)) % adler32mod
+		s2 = (s2 + s1) % adler32mod
+	}
+	return s1, s2
+}
+
 func getAdler32(block []byte) uint32 {
-	h := adler32.New()
-	h.Write(block)
-	return h.Sum32()
+	s1, s2 := getAdler32Sums(block)
+	return s2<<16 | s1
+}
+
+func getNextAdler32(s1, s2, sz uint32, removed, added byte) uint32 {
+	s1 = (s1 + uint32(added) - uint32(removed)) % adler32mod
+	s2 = (s2 + s1 - (uint32(removed) * sz) - 1) % adler32mod
+	return s2<<16 | s1
 }
 
 func getMD4Checksum(block []byte) []byte {

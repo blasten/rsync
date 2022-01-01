@@ -111,6 +111,29 @@ func TestGetAdler32(t *testing.T) {
 	}
 }
 
+func TestGetAdler32Sums(t *testing.T) {
+	s1, s2 := getAdler32Sums([]byte("test"))
+
+	if got, wanted := s1, uint32(449); got != wanted {
+		t.Errorf("got %v, wanted %v", got, wanted)
+	}
+
+	if got, wanted := s2, uint32(1117); got != wanted {
+		t.Errorf("got %v, wanted %v", got, wanted)
+	}
+}
+
+func TestGetNextAdler32(t *testing.T) {
+	block := []byte("test")
+	s1, s2 := getAdler32Sums(block)
+	removed, added := byte('t'), byte('!')
+	got := getNextAdler32(s1, s2, uint32(len(block)), removed, added)
+	wanted := getAdler32([]byte("est!"))
+	if got != wanted {
+		t.Errorf("got %v, wanted %v", got, wanted)
+	}
+}
+
 func TestGetMD4Checksum(t *testing.T) {
 	checksum := getMD4Checksum([]byte("test"))
 	wanted := []byte{219, 52, 109, 105, 29, 122, 204, 77, 194, 98, 93, 177, 159, 158, 63, 82}

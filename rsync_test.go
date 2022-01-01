@@ -30,28 +30,42 @@ func CompareSlice[T comparable](a, b []T) error {
 	return nil
 }
 
-func TestGetFileMeta(t *testing.T) {
-	blocks := getFileBlocks("foo", []byte{219, 52, 109, 105}, 2)
+func TestGetFileHashes(t *testing.T) {
+	dir, err := os.MkdirTemp(os.TempDir(), "test")
+	if err != nil {
+		t.Error(err)
+	}
+	defer os.RemoveAll(dir)
 
-	if got, wanted := len(blocks), 2; got != wanted {
+	fullFile := path.Join(dir, "file1")
+	f, err := os.Create(fullFile)
+	if err != nil {
+		t.Error(err)
+	}
+	f.Write([]byte{219, 52, 109, 105})
+	f.Close()
+
+	hashes := getFileHashes(fullFile, 2)
+
+	if got, wanted := len(hashes), 2; got != wanted {
 		t.Errorf("got %v, wanted %v", got, wanted)
 	}
 
-	if got, wanted := blocks[0].weak, uint32(32243984); got != wanted {
+	if got, wanted := hashes[0].weak, uint32(32243984); got != wanted {
 		t.Errorf("got %v, wanted %v", got, wanted)
 	}
 
-	if got, wanted := blocks[1].weak, uint32(21299415); got != wanted {
+	if got, wanted := hashes[1].weak, uint32(21299415); got != wanted {
 		t.Errorf("got adler32 checksum %v, wanted %v", got, wanted)
 	}
 
 	wanted := []byte{248, 29, 157, 75, 5, 102, 74, 32, 31, 166, 181, 202, 233, 47, 255, 95}
-	if got := []byte(blocks[0].strong); !bytes.Equal(got, wanted) {
+	if got := []byte(hashes[0].strong); !bytes.Equal(got, wanted) {
 		t.Errorf("got md4 checksum %v, wanted %v", got, wanted)
 	}
 
 	wanted = []byte{167, 238, 255, 206, 211, 199, 81, 166, 165, 5, 104, 35, 130, 142, 20, 119}
-	if got := []byte(blocks[1].strong); !bytes.Equal(got, wanted) {
+	if got := []byte(hashes[1].strong); !bytes.Equal(got, wanted) {
 		t.Errorf("got md4 checksum %v, wanted %v", got, wanted)
 	}
 }
@@ -88,7 +102,7 @@ func TestRecurseDir(t *testing.T) {
 	}
 
 	files := []string{}
-	err = recurseDir(dir, func(file string, entry os.DirEntry) error {
+	err = recurseDir(dir, "", func(file string, entry os.DirEntry) error {
 		files = append(files, file)
 		return nil
 	})
@@ -120,6 +134,7 @@ func TestGetFilesChecksums(t *testing.T) {
 			t.Error(err)
 		}
 		f.WriteString("content of file 1")
+		f.Close()
 	}
 
 	{
@@ -128,6 +143,7 @@ func TestGetFilesChecksums(t *testing.T) {
 			t.Error(err)
 		}
 		f.WriteString("content of file 2")
+		f.Close()
 	}
 
 	fsBlocks, err := getBlocks(dir,
@@ -191,6 +207,7 @@ func TestPushPull(t *testing.T) {
 		t.Error(err)
 	}
 	f.WriteString("content of file 1")
+	f.Close()
 
 	dest, err := os.MkdirTemp(os.TempDir(), "dest")
 	if err != nil {
