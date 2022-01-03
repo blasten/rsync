@@ -21,12 +21,8 @@ const (
 )
 
 const (
-	syncOp OpCode = iota
-)
-
-const (
 	blockSize       uint32 = 1000
-	protocolVersion byte   = 1
+	protocolVersion uint32 = 1
 
 	successSig = 1
 )
@@ -257,17 +253,14 @@ func getHashIndex(s1, s2 uint32, entries []*block, b []byte) (uint32, error) {
 }
 
 func push(r io.Reader, w io.Writer, src string) error {
-	if _, err := w.Write([]byte{byte(syncOp)}); err != nil {
-		return fmt.Errorf("could not send sync operation: %v", err.Error())
+	version, err := readVarint(r)
+	if err != nil {
+		return fmt.Errorf("could not read version: %v", err.Error())
 	}
-	rHeader := make([]byte, 1)
-	if _, err := r.Read(rHeader); err != nil {
-		return fmt.Errorf("could not read header: %v", err.Error())
-	}
-	if rVersion := rHeader[0]; rVersion != protocolVersion {
+	if version != protocolVersion {
 		return fmt.Errorf(
 			"remote uses a different version: %d, the local version is: %d",
-			rVersion,
+			version,
 			protocolVersion,
 		)
 	}
@@ -325,13 +318,6 @@ func push(r io.Reader, w io.Writer, src string) error {
 }
 
 func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
-	rHeader := make([]byte, 1)
-	if _, err := r.Read(rHeader); err != nil {
-		return fmt.Errorf("could not read remote headers: %v", err.Error())
-	}
-	if rHeader[0] != byte(syncOp) {
-		return fmt.Errorf("unexpected operation: %v", rHeader[0])
-	}
 	lFiles := []string{}
 	err := recurseDir(src, "", func(file string, entry os.DirEntry) error {
 		lFiles = append(lFiles, file)
@@ -344,7 +330,7 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 	if err != nil {
 		return fmt.Errorf("could not get file metas: %v", err.Error())
 	}
-	if _, err := w.Write([]byte{protocolVersion}); err != nil {
+	if err := writeVarint(protocolVersion, w); err != nil {
 		return fmt.Errorf("could not write protocol version: %v", err.Error())
 	}
 	if err := writeVarint(lBlockSize, w); err != nil {
