@@ -10,9 +10,9 @@ import (
 	"testing"
 )
 
-func TestWriteVarintUint32(t *testing.T) {
+func TestWriteVarint(t *testing.T) {
 	b := bytes.NewBuffer([]byte{})
-	if err := writeUint32(10, b); err != nil {
+	if err := writeVarint(10, b); err != nil {
 		t.Error(err)
 	}
 	got := b.Bytes()
@@ -22,7 +22,7 @@ func TestWriteVarintUint32(t *testing.T) {
 	}
 
 	b.Reset()
-	if err := writeUint32(300, b); err != nil {
+	if err := writeVarint(300, b); err != nil {
 		t.Error(err)
 	}
 	got = b.Bytes()
@@ -32,7 +32,7 @@ func TestWriteVarintUint32(t *testing.T) {
 	}
 
 	b.Reset()
-	if err := writeUint32(math.MaxUint32, b); err != nil {
+	if err := writeVarint(math.MaxUint32, b); err != nil {
 		t.Error(err)
 	}
 	got = b.Bytes()
@@ -42,7 +42,7 @@ func TestWriteVarintUint32(t *testing.T) {
 	}
 
 	b.Reset()
-	if err := writeUint32(0, b); err != nil {
+	if err := writeVarint(0, b); err != nil {
 		t.Error(err)
 	}
 	got = b.Bytes()
@@ -52,28 +52,82 @@ func TestWriteVarintUint32(t *testing.T) {
 	}
 }
 
+func TestWrapVarint(t *testing.T) {
+	b := bytes.NewBuffer([]byte{})
+	if err := wrapVarint(10, 1, b); err != nil {
+		t.Error(err)
+	}
+	got := b.Bytes()
+	wanted := []byte{8, 10}
+	if !bytes.Equal(got, wanted) {
+		t.Errorf("got %v, wanted %v", got, wanted)
+	}
+}
+
+func TestGetValueVarint(t *testing.T) {
+	wantedFieldNum := uint32(17)
+	b := bytes.NewBuffer([]byte{})
+	if err := wrapVarint(10, wantedFieldNum, b); err != nil {
+		t.Error(err)
+	}
+
+	fieldNum, fieldType, err := getValueMeta(b)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if got, wanted := fieldNum, wantedFieldNum; got != wanted {
+		t.Errorf("got %v, wanted %v", got, wanted)
+	}
+
+	if got, wanted := fieldType, uint32(typeVarint); got != wanted {
+		t.Errorf("got %v, wanted %v", got, wanted)
+	}
+}
+
+func TestGetValueBytes(t *testing.T) {
+	wantedFieldNum := uint32(17)
+	b := bytes.NewBuffer([]byte{})
+	if err := wrapBytes([]byte{}, wantedFieldNum, b); err != nil {
+		t.Error(err)
+	}
+
+	fieldNum, fieldType, err := getValueMeta(b)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if got, wanted := fieldNum, wantedFieldNum; got != wanted {
+		t.Errorf("got %v, wanted %v", got, wanted)
+	}
+
+	if got, wanted := fieldType, uint32(typeLengthDelimeted); got != wanted {
+		t.Errorf("got %v, wanted %v", got, wanted)
+	}
+}
+
 func TestReadVarintUint32(t *testing.T) {
-	got, _ := readUint32(bytes.NewBuffer([]byte{10}))
+	got, _ := readVarint(bytes.NewBuffer([]byte{10}))
 	wanted := uint32(10)
 	if got != wanted {
 		t.Errorf("got %v, wanted %v", got, wanted)
 	}
-	got, _ = readUint32(bytes.NewBuffer([]byte{172, 2}))
+	got, _ = readVarint(bytes.NewBuffer([]byte{172, 2}))
 	wanted = uint32(300)
 	if got != wanted {
 		t.Errorf("got %v, wanted %v", got, wanted)
 	}
-	got, _ = readUint32(bytes.NewBuffer([]byte{172, 2, 10}))
+	got, _ = readVarint(bytes.NewBuffer([]byte{172, 2, 10}))
 	wanted = uint32(300)
 	if got != wanted {
 		t.Errorf("got %v, wanted %v", got, wanted)
 	}
-	got, _ = readUint32(bytes.NewBuffer([]byte{255, 255, 255, 255, 15}))
+	got, _ = readVarint(bytes.NewBuffer([]byte{255, 255, 255, 255, 15}))
 	wanted = uint32(math.MaxUint32)
 	if got != wanted {
 		t.Errorf("got %v, wanted %v", got, wanted)
 	}
-	got, _ = readUint32(bytes.NewBuffer([]byte{0}))
+	got, _ = readVarint(bytes.NewBuffer([]byte{0}))
 	wanted = uint32(0)
 	if got != wanted {
 		t.Errorf("got %v, wanted %v", got, wanted)
@@ -92,6 +146,18 @@ func TestWriteBytes(t *testing.T) {
 	}
 }
 
+func TestWrapBytes(t *testing.T) {
+	b := bytes.NewBuffer([]byte{})
+	if err := wrapBytes([]byte("hello world"), 1, b); err != nil {
+		t.Error(err)
+	}
+	got := b.Bytes()
+	wanted := []byte{9, 11, 104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100}
+	if !bytes.Equal(got, wanted) {
+		t.Errorf("got %v, wanted %v", got, wanted)
+	}
+}
+
 func TestReadBytes(t *testing.T) {
 	got, err := readBytes(bytes.NewBuffer([]byte{11, 104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100}))
 	if err != nil {
@@ -103,21 +169,12 @@ func TestReadBytes(t *testing.T) {
 	}
 }
 
-func TestGetAdler32(t *testing.T) {
-	checksum := getAdler32([]byte("test"))
-	wanted := uint32(73204161)
-	if checksum != wanted {
-		t.Errorf("got %v, wanted %v", checksum, wanted)
-	}
-}
-
 func TestGetAdler32Sums(t *testing.T) {
 	s1, s2 := getAdler32Sums([]byte("test"))
 
 	if got, wanted := s1, uint32(449); got != wanted {
 		t.Errorf("got %v, wanted %v", got, wanted)
 	}
-
 	if got, wanted := s2, uint32(1117); got != wanted {
 		t.Errorf("got %v, wanted %v", got, wanted)
 	}
@@ -127,10 +184,13 @@ func TestGetNextAdler32(t *testing.T) {
 	block := []byte("test")
 	s1, s2 := getAdler32Sums(block)
 	removed, added := byte('t'), byte('!')
-	got := getNextAdler32(s1, s2, uint32(len(block)), removed, added)
-	wanted := getAdler32([]byte("est!"))
-	if got != wanted {
-		t.Errorf("got %v, wanted %v", got, wanted)
+	nextS1, nextS2 := getNextAdler32(s1, s2, uint32(len(block)), removed, added)
+	wantedS1, wantedS2 := getAdler32Sums([]byte("est!"))
+	if nextS1 != wantedS1 {
+		t.Errorf("got %v, wanted %v", nextS1, wantedS1)
+	}
+	if nextS2 != wantedS2 {
+		t.Errorf("got %v, wanted %v", nextS1, wantedS1)
 	}
 }
 
