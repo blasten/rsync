@@ -14,22 +14,6 @@ import (
 	"testing"
 )
 
-func CompareSlice[T comparable](a, b []T) error {
-	if len(a) != len(b) {
-		return fmt.Errorf("slices don't have the same size:\nA=%v\nB=%v", a, b)
-	}
-	s := make(map[T]struct{}, len(a))
-	for _, v := range a {
-		s[v] = struct{}{}
-	}
-	for _, v := range b {
-		if _, ok := s[v]; !ok {
-			return fmt.Errorf("slice A doesn't contain %v found in slice B.\nA=%v", v, a)
-		}
-	}
-	return nil
-}
-
 func TestGetFileHashes(t *testing.T) {
 	dir, err := os.MkdirTemp(os.TempDir(), "test")
 	if err != nil {
@@ -603,4 +587,22 @@ func TestPushPullDelete(t *testing.T) {
 	}()
 
 	wg.Wait()
+}
+
+// TODO: use type parameters once go1.18 is stable.
+// GitHub actions doesn't support it yet.
+func CompareSlice(a, b []string) error {
+	if len(a) != len(b) {
+		return fmt.Errorf("slices don't have the same size:\nA=%v\nB=%v", a, b)
+	}
+	s := make(map[string]struct{}, len(a))
+	for _, v := range a {
+		s[v] = struct{}{}
+	}
+	for _, v := range b {
+		if _, ok := s[v]; !ok {
+			return fmt.Errorf("slice A doesn't contain %v found in slice B.\nA=%v", v, a)
+		}
+	}
+	return nil
 }

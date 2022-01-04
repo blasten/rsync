@@ -1,0 +1,22 @@
+name: rsync tests
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: [ '1.17' ]
+    name: Go ${{ matrix.go }} tests
+    steps:
+      - uses: actions/checkout@v2
+      - name: Setup go
+        uses: actions/setup-go@v2
+        with:
+          go-version: ${{ matrix.go }}
+      - run: mkdir out
+      - run: go test -cover -coverprofile=out/coverage.out
+      - run: go tool cover -html=out/coverage.out -o out/coverage.html
+      - uses: actions/upload-artifact@v2
+        with:
+          name: coverage
+          path: out/coverage.html
