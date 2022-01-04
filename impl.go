@@ -6,6 +6,7 @@ package rsync
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -171,20 +172,14 @@ func processFile(file string, db blockDB, blockSize uint32, w io.Writer) error {
 		currOff := off
 		off += n
 		s1, s2 = getAdler32Sums(b[:n])
+
 		if entries, ok := db[s2]; ok {
 			idx, err := getHashIndex(s1, s2, entries, b[:n])
 			if err != nil {
 				continue
 			}
-			if lastOff < currOff {
-				fcontent := make([]byte, currOff-lastOff+1)
-				_, err := f.ReadAt(fcontent, int64(lastOff))
-				if err != nil {
-					return err
-				}
-				if err := wrapBytes(fcontent, fieldNumberFileContent, w); err != nil {
-					return err
-				}
+			if lastOff > -1 && lastOff < currOff {
+				return errors.New("unexpected state")
 			}
 			if err := wrapVarint(idx, fieldNumberHash, w); err != nil {
 				return err
@@ -197,11 +192,11 @@ func processFile(file string, db blockDB, blockSize uint32, w io.Writer) error {
 			if n == 0 || err == io.EOF {
 				break
 			}
+
 			currOff += n
 			off += n
+			added, removed := sb[0], b[0]
 			b = append(b[1:], sb...)
-			removed := b[0]
-			added := sb[0]
 			s1, s2 = getNextAdler32(s1, s2, blockSize, removed, added)
 			entries, ok := db[s2]
 			if !ok {
@@ -212,12 +207,12 @@ func processFile(file string, db blockDB, blockSize uint32, w io.Writer) error {
 				continue
 			}
 			if lastOff < currOff {
-				fcontent := make([]byte, currOff-lastOff+1)
-				_, err := f.ReadAt(fcontent, int64(lastOff))
+				fcontent := make([]byte, currOff-lastOff)
+				n, err := f.ReadAt(fcontent, int64(lastOff+1))
 				if err != nil {
 					return err
 				}
-				if err := wrapBytes(fcontent, fieldNumberFileContent, w); err != nil {
+				if err := wrapBytes(fcontent[:n], fieldNumberFileContent, w); err != nil {
 					return err
 				}
 			}
@@ -231,14 +226,12 @@ func processFile(file string, db blockDB, blockSize uint32, w io.Writer) error {
 	if lastOff >= off {
 		return nil
 	}
-	if lastOff == -1 {
-		lastOff = 0
-	}
-	fcontent := make([]byte, off-lastOff+1)
-	if _, err := f.ReadAt(fcontent, int64(lastOff)); err != nil {
+	fcontent := make([]byte, off-lastOff)
+	n, err := f.ReadAt(fcontent, int64(lastOff+1))
+	if err != nil {
 		return err
 	}
-	wrapBytes(fcontent, fieldNumberFileContent, w)
+	wrapBytes(fcontent[:n], fieldNumberFileContent, w)
 	return nil
 }
 
