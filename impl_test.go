@@ -195,6 +195,168 @@ func TestGetFilesChecksums(t *testing.T) {
 	}
 }
 
+func TestWriteChecksumsBlockMiss(t *testing.T) {
+	dir, err := os.MkdirTemp(os.TempDir(), "test")
+	if err != nil {
+		t.Error(err)
+	}
+	defer os.RemoveAll(dir)
+
+	{
+		f, err := os.Create(path.Join(dir, "file1"))
+		if err != nil {
+			t.Error(err)
+		}
+		f.WriteString("content of file 1")
+		f.Close()
+	}
+
+	{
+		f, err := os.Create(path.Join(dir, "file2"))
+		if err != nil {
+			t.Error(err)
+		}
+		f.WriteString("content of file 2")
+		f.Close()
+	}
+
+	db := make(blockDB)
+	blockSize := uint32(10)
+	w := bytes.NewBuffer([]byte{})
+	writeChecksums(dir, []string{"file1", "file2"}, db, blockSize, w)
+
+	ew := bytes.NewBuffer([]byte{})
+	wrapBytes([]byte("file1"), fieldNumberFileName, ew)
+	wrapBytes([]byte("content of file 1"), fieldNumberFileContent, ew)
+
+	wrapBytes([]byte("file2"), fieldNumberFileName, ew)
+	wrapBytes([]byte("content of file 2"), fieldNumberFileContent, ew)
+	wrapVarint(successSig, fieldDonePushing, ew)
+
+	if got, wanted := w.Bytes(), ew.Bytes(); !bytes.Equal(got, wanted) {
+		t.Errorf("got %v, wanted %v", got, wanted)
+	}
+}
+
+func TestWriteChecksumsBlockHit(t *testing.T) {
+	dir, err := os.MkdirTemp(os.TempDir(), "test")
+	if err != nil {
+		t.Error(err)
+	}
+	defer os.RemoveAll(dir)
+
+	{
+		f, err := os.Create(path.Join(dir, "file1"))
+		if err != nil {
+			t.Error(err)
+		}
+		f.WriteString("file 1 has content 1")
+		f.Close()
+	}
+
+	{
+		f, err := os.Create(path.Join(dir, "file2"))
+		if err != nil {
+			t.Error(err)
+		}
+		f.WriteString("file 2 has content 2")
+		f.Close()
+	}
+
+	db := make(blockDB)
+
+	// Write blocks.
+	blockSize := uint32(10)
+	{
+		fcontent := []byte("file 1 has")
+		if len(fcontent) < int(blockSize) {
+			t.Errorf("expected block of size %v", blockSize)
+		}
+
+		s1, s2 := getAdler32Sums(fcontent)
+		db[s2] = []*block{
+			{
+				idx: 0,
+				hashes: &blockHashes{
+					weak:   s2<<16 | s1,
+					strong: getMD4Checksum(fcontent),
+				},
+			},
+		}
+	}
+
+	{
+		fcontent := []byte(" content 1")
+		if len(fcontent) < int(blockSize) {
+			t.Errorf("expected block of size %v", blockSize)
+		}
+
+		s1, s2 := getAdler32Sums(fcontent)
+		db[s2] = []*block{
+			{
+				idx: 1,
+				hashes: &blockHashes{
+					weak:   s2<<16 | s1,
+					strong: getMD4Checksum(fcontent),
+				},
+			},
+		}
+	}
+
+	{
+		fcontent := []byte("file 2 has")
+		if len(fcontent) < int(blockSize) {
+			t.Errorf("expected block of size %v", blockSize)
+		}
+
+		s1, s2 := getAdler32Sums(fcontent)
+		db[s2] = []*block{
+			{
+				idx: 2,
+				hashes: &blockHashes{
+					weak:   s2<<16 | s1,
+					strong: getMD4Checksum(fcontent),
+				},
+			},
+		}
+	}
+
+	{
+		fcontent := []byte(" content 2")
+		if len(fcontent) < int(blockSize) {
+			t.Errorf("expected block of size %v", blockSize)
+		}
+
+		s1, s2 := getAdler32Sums(fcontent)
+		db[s2] = []*block{
+			{
+				idx: 3,
+				hashes: &blockHashes{
+					weak:   s2<<16 | s1,
+					strong: getMD4Checksum(fcontent),
+				},
+			},
+		}
+	}
+
+	w := bytes.NewBuffer([]byte{})
+	writeChecksums(dir, []string{"file1", "file2"}, db, blockSize, w)
+
+	ew := bytes.NewBuffer([]byte{})
+	wrapBytes([]byte("file1"), fieldNumberFileName, ew)
+	wrapVarint(0, fieldNumberHash, ew)
+	wrapVarint(1, fieldNumberHash, ew)
+
+	wrapBytes([]byte("file2"), fieldNumberFileName, ew)
+	wrapVarint(2, fieldNumberHash, ew)
+	wrapVarint(3, fieldNumberHash, ew)
+	wrapVarint(successSig, fieldDonePushing, ew)
+
+	if got, wanted := w.Bytes(), ew.Bytes(); !bytes.Equal(got, wanted) {
+		t.Errorf("got %v, wanted %v", got, wanted)
+	}
+}
+
 func TestPushPull(t *testing.T) {
 	src, err := os.MkdirTemp(os.TempDir(), "src")
 	if err != nil {
