@@ -153,6 +153,7 @@ func writeChecksums(base string, filenames []string, db blockDB, blockSize uint3
 			return err
 		}
 	}
+	// Notify success to the peer.
 	return wrapVarint(successSig, fieldDonePushing, w)
 }
 
@@ -311,6 +312,20 @@ func push(r io.Reader, w io.Writer, src string) error {
 	err = writeChecksums(src, lFiles, blocks, rBlockSize, w)
 	if err != nil {
 		return fmt.Errorf("could not determine checksums: %v", err.Error())
+	}
+	fieldNum, fieldType, err := getValueMeta(r)
+	if err != nil {
+		return fmt.Errorf("expected success check: %s", err.Error())
+	}
+	if fieldNum != fieldDonePushing || fieldType != typeVarint {
+		return fmt.Errorf("expected success check: %d, %d", fieldNum, fieldType)
+	}
+	success, err := readVarint(r)
+	if err != nil {
+		return fmt.Errorf("expected success check: %s", err.Error())
+	}
+	if success != successSig {
+		return fmt.Errorf("success check expected %v, but got: %v", successSig, success)
 	}
 	return nil
 }
@@ -494,7 +509,8 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 			if success != successSig {
 				return fmt.Errorf("success check expected %v, but got: %v", successSig, success)
 			}
-			return nil
+			// Notify success to the peer.
+			return wrapVarint(successSig, fieldDonePushing, w)
 		default:
 			return fmt.Errorf("invalid field number: %v", fieldNum)
 		}

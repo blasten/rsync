@@ -32,7 +32,7 @@ const (
 // An error occurs if the varint cannot be read.
 // This metadata is based on the protocol buffer encoding.
 // https://developers.google.com/protocol-buffers/docs/encoding#structure
-func getValueMeta(r io.Reader) (uint32, uint32, error) {
+func getValueMeta(r io.Reader) (uint32, wireType, error) {
 	v, err := readVarint(r)
 	if err != nil {
 		return 0, 0, err

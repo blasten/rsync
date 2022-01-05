@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"sync"
 	"testing"
 )
 
@@ -495,26 +496,36 @@ func TestPushPull(t *testing.T) {
 	peer2r, peer2w := io.Pipe()
 
 	errCh := make(chan error, 1)
-	jobCh := make(chan struct{}, 2)
+	doneCh := make(chan struct{}, 1)
+	var wg = sync.WaitGroup{}
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+
 		if err := push(peer2r, peer1w, src); err != nil {
 			errCh <- fmt.Errorf("push failed: %v", err.Error())
 		}
-		jobCh <- struct{}{}
 	}()
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+
 		if err := pull(peer1r, peer2w, dest, 10); err != nil {
 			errCh <- fmt.Errorf("pull failed: %v", err.Error())
 		}
-		jobCh <- struct{}{}
+	}()
+
+	go func() {
+		wg.Wait()
+		doneCh <- struct{}{}
 	}()
 
 	select {
 	case err := <-errCh:
 		t.Error(err)
-	case <-jobCh:
+	case <-doneCh:
 	}
 
 	b, err := os.ReadFile(path.Join(dest, "file1"))
