@@ -6,30 +6,25 @@ package rsync
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
-	"sync"
 	"testing"
 )
 
 func TestGetFileHashes(t *testing.T) {
-	dir, err := os.MkdirTemp(os.TempDir(), "test")
-	if err != nil {
-		t.Error(err)
-	}
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
-	fullFile := path.Join(dir, "file1")
-	f, err := os.Create(fullFile)
+	f, err := os.Create(path.Join(dir, "file1"))
 	if err != nil {
 		t.Error(err)
 	}
 	f.Write([]byte{219, 52, 109, 105})
 	f.Close()
 
-	hashes := getFileHashes(fullFile, 2)
+	hashes := getFileHashes(dir, "file1", 2)
 
 	if got, wanted := len(hashes), 2; got != wanted {
 		t.Errorf("got %v, wanted %v", got, wanted)
@@ -55,11 +50,7 @@ func TestGetFileHashes(t *testing.T) {
 }
 
 func TestRecurseDir(t *testing.T) {
-	dir, err := os.MkdirTemp(os.TempDir(), "test")
-	if err != nil {
-		t.Error(err)
-	}
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	if _, err := os.Create(path.Join(dir, "file1")); err != nil {
 		t.Error(err)
@@ -86,7 +77,7 @@ func TestRecurseDir(t *testing.T) {
 	}
 
 	files := []string{}
-	err = recurseDir(dir, "", func(file string, entry os.DirEntry) error {
+	err := recurseDir(dir, "", func(file string, entry os.DirEntry) error {
 		files = append(files, file)
 		return nil
 	})
@@ -106,11 +97,7 @@ func TestRecurseDir(t *testing.T) {
 }
 
 func TestGetFilesChecksums(t *testing.T) {
-	dir, err := os.MkdirTemp(os.TempDir(), "test")
-	if err != nil {
-		t.Error(err)
-	}
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	{
 		f, err := os.Create(path.Join(dir, "file1"))
@@ -152,11 +139,11 @@ func TestGetFilesChecksums(t *testing.T) {
 		t.Error("expected file2")
 	}
 
-	if got, wanted := fsBlocks.files["file1"], [2]int{0, 1}; got != wanted {
+	if got, wanted := fsBlocks.files["file1"], [2]uint32{0, 1}; got != wanted {
 		t.Errorf("got %v, wanted %v", got, wanted)
 	}
 
-	if got, wanted := fsBlocks.files["file2"], [2]int{1, 1}; got != wanted {
+	if got, wanted := fsBlocks.files["file2"], [2]uint32{1, 1}; got != wanted {
 		t.Errorf("got %v, wanted %v", got, wanted)
 	}
 
@@ -180,11 +167,7 @@ func TestGetFilesChecksums(t *testing.T) {
 }
 
 func TestWriteChecksumsBlockMiss(t *testing.T) {
-	dir, err := os.MkdirTemp(os.TempDir(), "test")
-	if err != nil {
-		t.Error(err)
-	}
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	{
 		f, err := os.Create(path.Join(dir, "file1"))
@@ -223,11 +206,7 @@ func TestWriteChecksumsBlockMiss(t *testing.T) {
 }
 
 func TestWriteChecksumsBlockHit(t *testing.T) {
-	dir, err := os.MkdirTemp(os.TempDir(), "test")
-	if err != nil {
-		t.Error(err)
-	}
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	{
 		f, err := os.Create(path.Join(dir, "file1"))
@@ -342,11 +321,7 @@ func TestWriteChecksumsBlockHit(t *testing.T) {
 }
 
 func TestWriteChecksumsBlockHitWithAlignedDelta(t *testing.T) {
-	dir, err := os.MkdirTemp(os.TempDir(), "test")
-	if err != nil {
-		t.Error(err)
-	}
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	{
 		f, err := os.Create(path.Join(dir, "file1"))
@@ -413,11 +388,7 @@ func TestWriteChecksumsBlockHitWithAlignedDelta(t *testing.T) {
 }
 
 func TestWriteChecksumsBlockHitWithUnalignedDelta(t *testing.T) {
-	dir, err := os.MkdirTemp(os.TempDir(), "test")
-	if err != nil {
-		t.Error(err)
-	}
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	{
 		f, err := os.Create(path.Join(dir, "file1"))
@@ -503,11 +474,10 @@ func TestWriteChecksumsBlockHitWithUnalignedDelta(t *testing.T) {
 }
 
 func TestPushPull(t *testing.T) {
-	src, err := os.MkdirTemp(os.TempDir(), "src")
+	src, err := os.MkdirTemp(t.TempDir(), "src")
 	if err != nil {
 		t.Error(err)
 	}
-	defer os.RemoveAll(src)
 
 	f, err := os.Create(path.Join(src, "file1"))
 	if err != nil {
@@ -516,48 +486,56 @@ func TestPushPull(t *testing.T) {
 	f.WriteString("content of file 1")
 	f.Close()
 
-	dest, err := os.MkdirTemp(os.TempDir(), "dest")
+	dest, err := os.MkdirTemp(t.TempDir(), "dest")
 	if err != nil {
 		t.Error(err)
 	}
-	defer os.RemoveAll(dest)
 
 	peer1r, peer1w := io.Pipe()
 	peer2r, peer2w := io.Pipe()
 
-	var wg sync.WaitGroup
+	errCh := make(chan error, 1)
+	jobCh := make(chan struct{}, 2)
 
-	wg.Add(1)
 	go func() {
 		if err := push(peer2r, peer1w, src); err != nil {
-			t.Error(err)
+			errCh <- fmt.Errorf("push failed: %v", err.Error())
 		}
-		wg.Done()
+		jobCh <- struct{}{}
 	}()
 
-	wg.Add(1)
 	go func() {
 		if err := pull(peer1r, peer2w, dest, 10); err != nil {
-			t.Error(err)
+			errCh <- fmt.Errorf("pull failed: %v", err.Error())
 		}
-		wg.Done()
+		jobCh <- struct{}{}
 	}()
 
-	wg.Wait()
+	select {
+	case err := <-errCh:
+		t.Error(err)
+	case <-jobCh:
+	}
+
+	b, err := os.ReadFile(path.Join(dest, "file1"))
+	if err != nil {
+		t.Error(err)
+	}
+	if got, wanted := string(b), "content of file 1"; got != wanted {
+		t.Errorf("got %v, wanted %v", got, wanted)
+	}
 }
 
 func TestPushPullDelete(t *testing.T) {
-	src, err := os.MkdirTemp(os.TempDir(), "src")
+	src, err := os.MkdirTemp(t.TempDir(), "src")
 	if err != nil {
 		t.Error(err)
 	}
-	defer os.RemoveAll(src)
 
-	dest, err := os.MkdirTemp(os.TempDir(), "dest")
+	dest, err := os.MkdirTemp(t.TempDir(), "dest")
 	if err != nil {
 		t.Error(err)
 	}
-	defer os.RemoveAll(dest)
 
 	f, err := os.Create(path.Join(dest, "file1"))
 	if err != nil {
@@ -568,25 +546,33 @@ func TestPushPullDelete(t *testing.T) {
 	peer1r, peer1w := io.Pipe()
 	peer2r, peer2w := io.Pipe()
 
-	var wg sync.WaitGroup
+	errCh := make(chan error, 1)
+	jobCh := make(chan struct{}, 2)
 
-	wg.Add(1)
 	go func() {
 		if err := push(peer2r, peer1w, src); err != nil {
-			t.Error(err)
+			errCh <- fmt.Errorf("push failed: %v", err.Error())
 		}
-		wg.Done()
+		jobCh <- struct{}{}
 	}()
 
-	wg.Add(1)
 	go func() {
 		if err := pull(peer1r, peer2w, dest, 10); err != nil {
-			t.Error(err)
+			errCh <- fmt.Errorf("pull failed: %v", err.Error())
 		}
-		wg.Done()
+		jobCh <- struct{}{}
 	}()
 
-	wg.Wait()
+	select {
+	case err := <-errCh:
+		t.Error(err)
+	case <-jobCh:
+	}
+
+	_, err = os.Stat(path.Join(dest, "file1"))
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		t.Error("file expected to be deleted was found")
+	}
 }
 
 // TODO: use type parameters once go1.18 is stable.

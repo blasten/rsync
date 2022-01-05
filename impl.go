@@ -46,21 +46,26 @@ type blockHashes struct {
 
 	// The strong checksum that uses MD4.
 	strong []byte
+
+	// The file that contains these hashes relative
+	// to a base directory.
+	relfile string
 }
 
 type fsBlocks struct {
 	blocks []*blockHashes
-	files  map[filename]blockRange
+	files  map[fname]blockRange
 }
 
 type onFileCb = func(string, os.DirEntry) error
-type filename string
-type blockRange [2]int
+type fname string
+type blockRange [2]uint32
 type OpCode byte
 type blockDB map[uint32][]*block
+type found = struct{}
 
-func getFileHashes(file string, blockSize int) []*blockHashes {
-	f, err := os.Open(file)
+func getFileHashes(basedir, relfile string, blockSize int) []*blockHashes {
+	f, err := os.Open(path.Join(basedir, relfile))
 	if err != nil {
 		return make([]*blockHashes, 0)
 	}
@@ -88,8 +93,9 @@ func getFileHashes(file string, blockSize int) []*blockHashes {
 		}
 		s1, s2 := getAdler32Sums(b[:n])
 		blocks[blockIdx] = &blockHashes{
-			weak:   s2<<16 | s1,
-			strong: getMD4Checksum(b[:n]),
+			weak:    s2<<16 | s1,
+			strong:  getMD4Checksum(b[:n]),
+			relfile: relfile,
 		}
 		if err == io.EOF {
 			return blocks
@@ -125,14 +131,13 @@ func recurseDir(base string, relDir string, onFile onFileCb) error {
 func getBlocks(basedir string, files []string, blockSize int) (*fsBlocks, error) {
 	allBlocks := fsBlocks{
 		blocks: []*blockHashes{},
-		files:  make(map[filename]blockRange),
+		files:  make(map[fname]blockRange),
 	}
 	for _, relfile := range files {
-		fullFile := path.Join(basedir, relfile)
-		fileHashes := getFileHashes(fullFile, blockSize)
-		allBlocks.files[filename(relfile)] = blockRange{
-			len(allBlocks.blocks),
-			len(fileHashes),
+		fileHashes := getFileHashes(basedir, relfile, blockSize)
+		allBlocks.files[fname(relfile)] = blockRange{
+			uint32(len(allBlocks.blocks)),
+			uint32(len(fileHashes)),
 		}
 		allBlocks.blocks = append(allBlocks.blocks, fileHashes...)
 	}
@@ -340,7 +345,13 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 			return fmt.Errorf("could not write hash: %v", err.Error())
 		}
 	}
+
 	// Read response from peer.
+	var currFile *os.File
+	var blockIdx uint32
+	var filename string
+	b := make([]byte, blockSize)
+	fSent := make(map[fname]found)
 	for {
 		fieldNum, fieldType, err := getValueMeta(r)
 		if err != nil {
@@ -351,31 +362,135 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 			if fieldType != typeLengthDelimeted {
 				return fmt.Errorf("expected type: %v, but got: %v", typeLengthDelimeted, fieldType)
 			}
-			_, err := readBytes(r)
+			if currFile != nil {
+				currFile.Close()
+				currFile = nil
+			}
+			name, err := readBytes(r)
 			if err != nil {
 				return fmt.Errorf("could not read bytes: %v", err)
+			}
+			filename = string(name)
+			if _, ok := fSent[fname(filename)]; ok {
+				return fmt.Errorf("file already sent: %s", filename)
+			}
+			fSent[fname(filename)] = found{}
+			filepath := path.Join(src, string(filename))
+			blockIdx = 0
+			if _, err := os.Stat(filepath); errors.Is(err, os.ErrNotExist) {
+				currFile, err = os.OpenFile(filepath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
+				if err != nil {
+					return fmt.Errorf("could not create file %s: %v", filepath, err)
+				}
+			} else {
+				currFile, err = os.Open(filepath)
+				if err != nil {
+					return fmt.Errorf("could not open file %s: %v", filepath, err)
+				}
 			}
 		case fieldNumberHash:
 			if fieldType != typeVarint {
 				return fmt.Errorf("expected type: %v, but got: %v", typeVarint, fieldType)
 			}
-			_, err := readVarint(r)
+			if currFile == nil || len(filename) == 0 {
+				return errors.New("expected file and filename")
+			}
+			rblockIdx, err := readVarint(r)
+			if rblockIdx >= uint32(len(fsBlocks.blocks)) {
+				return fmt.Errorf(
+					"unexpected block index %d, the max number of local blocks is %d",
+					rblockIdx,
+					len(fsBlocks.blocks),
+				)
+			}
+			if rg, ok := fsBlocks.files[fname(filename)]; ok {
+				startBlockIdx, endBlockIdx := rg[0], rg[1]
+				if startBlockIdx+blockIdx == rblockIdx && rblockIdx < endBlockIdx {
+					// Ok. block found at the expected offset.
+					continue
+				} else {
+					// A block was found, but the block at the current offset doesn't match.
+					// This can happen if file content is moved around.
+					remaining := make([]byte, (endBlockIdx-startBlockIdx)*blockSize)
+					n1, err := currFile.ReadAt(remaining, (int64(blockIdx)+1)*int64(blockSize))
+					if err != nil {
+						return fmt.Errorf("could not read file %s: %s", filename, err.Error())
+					}
+					err = currFile.Truncate(int64(blockIdx) * int64(blockSize))
+					if err != nil {
+						return fmt.Errorf("could not truncate file %s: %s", filename, err.Error())
+					}
+					relfile := fsBlocks.blocks[rblockIdx].relfile
+					f, err := os.Open(path.Join(src, relfile))
+					if err != nil {
+						return fmt.Errorf("could not open file %s in %s: %s", relfile, src, err.Error())
+					}
+					rg := fsBlocks.files[fname(relfile)]
+					off := int64(rg[0]) * int64(blockSize)
+					n2, err := f.ReadAt(b, off)
+					f.Close()
+					if err != nil {
+						return fmt.Errorf("could not read file %s in %s: %s", relfile, src, err.Error())
+					}
+					currFile.Write(b[:n2])
+					currFile.Write(remaining[:n1])
+				}
+			} else {
+				// The file was not present locally, but a block was found.
+				// This can happen when a file is moved.
+				// In this case, the block is copied from file A to file B.
+				relfile := fsBlocks.blocks[rblockIdx].relfile
+				f, err := os.Open(path.Join(src, relfile))
+				if err != nil {
+					return fmt.Errorf("could not open file %s in %s: %s", relfile, src, err.Error())
+				}
+				rg := fsBlocks.files[fname(relfile)]
+				off := int64(rg[0]) * int64(blockSize)
+				n, err := f.ReadAt(b, off)
+				f.Close()
+				if err != nil {
+					return fmt.Errorf("could not read file %s in %s: %s", relfile, src, err.Error())
+				}
+				_, err = currFile.WriteAt(b[:n], int64(blockIdx)*int64(blockSize))
+				if err != nil {
+					return fmt.Errorf("could not write file %s: %s", filename, err.Error())
+				}
+			}
+			blockIdx++
 			if err != nil {
-				return fmt.Errorf("could not read varint: %v", err)
+				return fmt.Errorf("could not read varint: %v", err.Error())
 			}
 		case fieldNumberFileContent:
 			if fieldType != typeLengthDelimeted {
 				return fmt.Errorf("expected type: %v, but got: %v", typeLengthDelimeted, fieldType)
 			}
-			_, err := readBytes(r)
+			if currFile == nil || len(filename) == 0 {
+				return errors.New("expected file and filename")
+			}
+			fcontent, err := readBytes(r)
 			if err != nil {
-				return fmt.Errorf("could not read bytes: %v", err)
+				return fmt.Errorf("could not read bytes: %v", err.Error())
+			}
+			// Write the file content in the expected offset.
+			_, err = currFile.WriteAt(fcontent, int64(blockIdx)*int64(blockSize))
+			if err != nil {
+				return fmt.Errorf("could not write file content %s: %s", filename, err.Error())
 			}
 		case fieldDonePushing:
-			success, err := readVarint(r)
-			if err != nil {
-				return fmt.Errorf("could not read success: %v", err)
+			if currFile != nil {
+				currFile.Close()
+				currFile = nil
 			}
+			// Delete files that are present locally, but were not sent by the peer.
+			for filename := range fsBlocks.files {
+				if _, ok := fSent[filename]; !ok {
+					err := os.Remove(path.Join(src, string(filename)))
+					if err != nil {
+						return fmt.Errorf("could not delete file %s: %s", filename, err.Error())
+					}
+				}
+			}
+			success, _ := readVarint(r)
 			if success != successSig {
 				return fmt.Errorf("success check expected %v, but got: %v", successSig, success)
 			}
