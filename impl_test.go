@@ -557,32 +557,62 @@ func TestPushPullDelete(t *testing.T) {
 	peer1r, peer1w := io.Pipe()
 	peer2r, peer2w := io.Pipe()
 
+	var wg = sync.WaitGroup{}
 	errCh := make(chan error, 1)
-	jobCh := make(chan struct{}, 2)
+	doneCh := make(chan struct{}, 1)
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+
 		if err := push(peer2r, peer1w, src); err != nil {
 			errCh <- fmt.Errorf("push failed: %v", err.Error())
 		}
-		jobCh <- struct{}{}
 	}()
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+
 		if err := pull(peer1r, peer2w, dest, 10); err != nil {
 			errCh <- fmt.Errorf("pull failed: %v", err.Error())
 		}
-		jobCh <- struct{}{}
+	}()
+
+	go func() {
+		wg.Wait()
+		doneCh <- struct{}{}
 	}()
 
 	select {
 	case err := <-errCh:
 		t.Error(err)
-	case <-jobCh:
+	case <-doneCh:
 	}
 
 	_, err = os.Stat(path.Join(dest, "file1"))
 	if err == nil || !errors.Is(err, os.ErrNotExist) {
 		t.Error("file expected to be deleted was found")
+	}
+}
+
+func TestRsync(t *testing.T) {
+	testDataDir := "test_data"
+	entries, err := os.ReadDir(testDataDir)
+	if err != nil {
+		t.Error(err)
+	}
+	for _, entry := range entries {
+		srcDir := path.Join(testDataDir, entry.Name(), "src")
+		currDir := path.Join(testDataDir, entry.Name(), "dest")
+		destDir, err := os.MkdirTemp(t.TempDir(), "dest")
+		if err != nil {
+			t.Error(err)
+		}
+		if err := copyFiles(currDir, destDir); err != nil {
+			t.Error(err)
+		}
+		compareDir(srcDir, destDir /*blockSize=*/, 10, t)
 	}
 }
 
@@ -602,4 +632,92 @@ func CompareSlice(a, b []string) error {
 		}
 	}
 	return nil
+}
+
+func copyFiles(src, dest string) error {
+	return recurseDir(src, "", func(file string, entry os.DirEntry) error {
+		b, err := os.ReadFile(path.Join(src, file))
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path.Join(dest, file), b, 0666)
+	})
+}
+
+func compareDir(src, dest string, blockSize uint32, t *testing.T) {
+	wanted := make(map[string][]byte)
+	recurseDir(src, "", func(file string, entry os.DirEntry) error {
+		filepath := path.Join(src, file)
+		b, err := os.ReadFile(filepath)
+		if err != nil {
+			return err
+		}
+		wanted[file] = b
+		return nil
+	})
+
+	peer1r, peer1w := io.Pipe()
+	peer2r, peer2w := io.Pipe()
+
+	var wg = sync.WaitGroup{}
+	errCh := make(chan error, 1)
+	doneCh := make(chan struct{}, 1)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := push(peer2r, peer1w, src); err != nil {
+			errCh <- fmt.Errorf("push failed: %v", err.Error())
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := pull(peer1r, peer2w, dest, blockSize); err != nil {
+			errCh <- fmt.Errorf("pull failed: %v", err.Error())
+		}
+	}()
+
+	go func() {
+		wg.Wait()
+		doneCh <- struct{}{}
+	}()
+
+	select {
+	case err := <-errCh:
+		t.Error(err)
+		return
+	case <-doneCh:
+	}
+
+	got := make(map[string][]byte)
+	recurseDir(dest, "", func(file string, entry os.DirEntry) error {
+		filepath := path.Join(dest, file)
+		b, err := os.ReadFile(filepath)
+		if err != nil {
+			return err
+		}
+		got[file] = b
+		return nil
+	})
+
+	for name := range wanted {
+		if _, ok := got[name]; !ok {
+			t.Errorf("expected file '%s', but it was not found.", name)
+		}
+	}
+	for name := range got {
+		if _, ok := wanted[name]; !ok {
+			t.Errorf("unexpected file '%s'.", name)
+		}
+	}
+
+	for name, b1 := range got {
+		b2 := wanted[name]
+		if !bytes.Equal(b1, b2) {
+			t.Errorf("file '%s' doesn't identical content in the dest dir."+
+				"\ngot\n\n'%s'\n\nwanted:\n\n'%s'", name, b1, b2)
+		}
+	}
 }

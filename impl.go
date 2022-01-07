@@ -171,8 +171,8 @@ func processFile(file string, db blockDB, blockSize uint32, w io.Writer) error {
 
 	var s1, s2 uint32
 	for {
-		n, err := f.Read(b)
-		if n == 0 || err == io.EOF {
+		n, _ := f.Read(b)
+		if n == 0 {
 			break
 		}
 		currOff := off
@@ -237,8 +237,7 @@ func processFile(file string, db blockDB, blockSize uint32, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	wrapBytes(fcontent[:n], fieldNumberFileContent, w)
-	return nil
+	return wrapBytes(fcontent[:n], fieldNumberFileContent, w)
 }
 
 func getHashIndex(s1, s2 uint32, entries []*block, b []byte) (uint32, error) {
@@ -426,12 +425,12 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 				} else {
 					// A block was found, but the block at the current offset doesn't match.
 					// This can happen if file content is moved around.
-					remaining := make([]byte, (endBlockIdx-startBlockIdx)*blockSize)
-					n1, err := currFile.ReadAt(remaining, (int64(blockIdx)+1)*int64(blockSize))
-					if err != nil {
+					remaining := make([]byte, (endBlockIdx-startBlockIdx)*lBlockSize)
+					n1, err := currFile.ReadAt(remaining, (int64(blockIdx)+1)*int64(lBlockSize))
+					if err != io.EOF && err != nil {
 						return fmt.Errorf("could not read file %s: %s", filename, err.Error())
 					}
-					err = currFile.Truncate(int64(blockIdx) * int64(blockSize))
+					err = currFile.Truncate(int64(blockIdx) * int64(lBlockSize))
 					if err != nil {
 						return fmt.Errorf("could not truncate file %s: %s", filename, err.Error())
 					}
@@ -441,10 +440,10 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 						return fmt.Errorf("could not open file %s in %s: %s", relfile, src, err.Error())
 					}
 					rg := fsBlocks.files[fname(relfile)]
-					off := int64(rg[0]) * int64(blockSize)
+					off := (int64(rblockIdx) - int64(rg[0])) * int64(lBlockSize)
 					n2, err := f.ReadAt(b, off)
 					f.Close()
-					if err != nil {
+					if err != io.EOF && err != nil {
 						return fmt.Errorf("could not read file %s in %s: %s", relfile, src, err.Error())
 					}
 					currFile.Write(b[:n2])
@@ -460,13 +459,13 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 					return fmt.Errorf("could not open file %s in %s: %s", relfile, src, err.Error())
 				}
 				rg := fsBlocks.files[fname(relfile)]
-				off := int64(rg[0]) * int64(blockSize)
+				off := (int64(rblockIdx) - int64(rg[0])) * int64(lBlockSize)
 				n, err := f.ReadAt(b, off)
 				f.Close()
-				if err != nil {
+				if err != io.EOF && err != nil {
 					return fmt.Errorf("could not read file %s in %s: %s", relfile, src, err.Error())
 				}
-				_, err = currFile.WriteAt(b[:n], int64(blockIdx)*int64(blockSize))
+				_, err = currFile.WriteAt(b[:n], int64(blockIdx)*int64(lBlockSize))
 				if err != nil {
 					return fmt.Errorf("could not write file %s: %s", filename, err.Error())
 				}
@@ -487,8 +486,8 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 				return fmt.Errorf("could not read bytes: %v", err.Error())
 			}
 			// Write the file content in the expected offset.
-			_, err = currFile.WriteAt(fcontent, int64(blockIdx)*int64(blockSize))
-			if err != nil {
+			_, err = currFile.WriteAt(fcontent, int64(blockIdx)*int64(lBlockSize))
+			if err != io.EOF && err != nil {
 				return fmt.Errorf("could not write file content %s: %s", filename, err.Error())
 			}
 		case fieldDonePushing:
