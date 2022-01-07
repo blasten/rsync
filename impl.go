@@ -397,7 +397,7 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 					return fmt.Errorf("could not create file %s: %v", filepath, err)
 				}
 			} else {
-				currFile, err = os.Open(filepath)
+				currFile, err = os.OpenFile(filepath, os.O_RDWR, 0666)
 				if err != nil {
 					return fmt.Errorf("could not open file %s: %v", filepath, err)
 				}
@@ -421,6 +421,7 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 				startBlockIdx, endBlockIdx := rg[0], rg[1]
 				if startBlockIdx+blockIdx == rblockIdx && rblockIdx < endBlockIdx {
 					// Ok. block found at the expected offset.
+					blockIdx++
 					continue
 				} else {
 					// A block was found, but the block at the current offset doesn't match.
