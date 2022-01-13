@@ -638,11 +638,28 @@ func CompareSlice(a, b []string) error {
 
 func copyFiles(src, dest string) error {
 	return recurseDir(src, "", func(file string, entry os.DirEntry) error {
-		b, err := os.ReadFile(path.Join(src, file))
+		srcFile := path.Join(src, file)
+		srcPath := path.Dir(srcFile)
+
+		b, err := os.ReadFile(srcFile)
 		if err != nil {
-			return err
+			return fmt.Errorf("could not read file: %s", err.Error())
 		}
-		return os.WriteFile(path.Join(dest, file), b, 0666)
+		finfo, err := os.Stat(srcFile)
+		if err != nil {
+			return fmt.Errorf("could not get file info: %s", err.Error())
+		}
+		destFile := path.Join(dest, file)
+		destPath := path.Dir(destFile)
+
+		dinfo, err := os.Stat(srcPath)
+		if err != nil {
+			return fmt.Errorf("could not get path info: %s", err.Error())
+		}
+		if err := os.MkdirAll(destPath, dinfo.Mode()); err != nil {
+			return fmt.Errorf("could not create dir: %s", err.Error())
+		}
+		return os.WriteFile(destFile, b, finfo.Mode())
 	})
 }
 
@@ -693,11 +710,13 @@ func compareDir(src, dest string, blockSize uint32, t *testing.T) {
 	})
 
 	for name := range wanted {
+		t.Logf("wanted file '%s'", name)
 		if _, ok := got[name]; !ok {
 			t.Errorf("expected file '%s', but it was not found.", name)
 		}
 	}
 	for name := range got {
+		t.Logf("got file '%s'", name)
 		if _, ok := wanted[name]; !ok {
 			t.Errorf("unexpected file '%s'.", name)
 		}
