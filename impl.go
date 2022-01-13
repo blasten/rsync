@@ -25,6 +25,7 @@ const (
 	blockSize       uint32 = 1000
 	protocolVersion uint32 = 1
 
+	failureSig = 0
 	successSig = 1
 )
 
@@ -55,6 +56,11 @@ type blockHashes struct {
 type fsBlocks struct {
 	blocks []*blockHashes
 	files  map[fname]blockRange
+}
+
+type fOP struct {
+	b   []byte
+	off int64
 }
 
 type onFileCb = func(string, os.DirEntry) error
@@ -360,12 +366,11 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 		}
 	}
 
+	fsOPS := make(map[fname][]*fOP)
 	// Read response from peer.
-	var currFile *os.File
 	var blockIdx uint32
-	var filename string
-	b := make([]byte, blockSize)
-	fSent := make(map[fname]found)
+	var filename fname
+	var fOff int64
 	for {
 		fieldNum, fieldType, err := getValueMeta(r)
 		if err != nil {
@@ -376,37 +381,22 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 			if fieldType != typeLengthDelimeted {
 				return fmt.Errorf("expected type: %v, but got: %v", typeLengthDelimeted, fieldType)
 			}
-			if currFile != nil {
-				currFile.Close()
-				currFile = nil
-			}
 			name, err := readBytes(r)
 			if err != nil {
 				return fmt.Errorf("could not read bytes: %v", err)
 			}
-			filename = string(name)
-			if _, ok := fSent[fname(filename)]; ok {
+			filename = fname(name)
+			if _, ok := fsOPS[filename]; ok {
 				return fmt.Errorf("file already sent: %s", filename)
 			}
-			fSent[fname(filename)] = found{}
-			filepath := path.Join(src, string(filename))
+			fsOPS[filename] = []*fOP{}
 			blockIdx = 0
-			if _, err := os.Stat(filepath); errors.Is(err, os.ErrNotExist) {
-				currFile, err = os.OpenFile(filepath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
-				if err != nil {
-					return fmt.Errorf("could not create file %s: %v", filepath, err)
-				}
-			} else {
-				currFile, err = os.OpenFile(filepath, os.O_RDWR, 0666)
-				if err != nil {
-					return fmt.Errorf("could not open file %s: %v", filepath, err)
-				}
-			}
+			fOff = 0
 		case fieldNumberHash:
 			if fieldType != typeVarint {
 				return fmt.Errorf("expected type: %v, but got: %v", typeVarint, fieldType)
 			}
-			if currFile == nil || len(filename) == 0 {
+			if len(filename) == 0 {
 				return errors.New("expected file and filename")
 			}
 			rblockIdx, err := readVarint(r)
@@ -417,40 +407,17 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 					len(fsBlocks.blocks),
 				)
 			}
+			var mismatch bool
 			if rg, ok := fsBlocks.files[fname(filename)]; ok {
 				startBlockIdx, endBlockIdx := rg[0], rg[1]
-				if startBlockIdx+blockIdx == rblockIdx && rblockIdx < endBlockIdx {
-					// Ok. block found at the expected offset.
-					blockIdx++
-					continue
-				} else {
-					// A block was found, but the block at the current offset doesn't match.
-					// This can happen if file content is moved around.
-					remaining := make([]byte, (endBlockIdx-startBlockIdx)*lBlockSize)
-					n1, err := currFile.ReadAt(remaining, (int64(blockIdx)+1)*int64(lBlockSize))
-					if err != io.EOF && err != nil {
-						return fmt.Errorf("could not read file %s: %s", filename, err.Error())
-					}
-					err = currFile.Truncate(int64(blockIdx) * int64(lBlockSize))
-					if err != nil {
-						return fmt.Errorf("could not truncate file %s: %s", filename, err.Error())
-					}
-					relfile := fsBlocks.blocks[rblockIdx].relfile
-					f, err := os.Open(path.Join(src, relfile))
-					if err != nil {
-						return fmt.Errorf("could not open file %s in %s: %s", relfile, src, err.Error())
-					}
-					rg := fsBlocks.files[fname(relfile)]
-					off := (int64(rblockIdx) - int64(rg[0])) * int64(lBlockSize)
-					n2, err := f.ReadAt(b, off)
-					f.Close()
-					if err != io.EOF && err != nil {
-						return fmt.Errorf("could not read file %s in %s: %s", relfile, src, err.Error())
-					}
-					currFile.Write(b[:n2])
-					currFile.Write(remaining[:n1])
+				if startBlockIdx+blockIdx != rblockIdx || rblockIdx >= endBlockIdx {
+					mismatch = true
 				}
+				blockIdx++
 			} else {
+				mismatch = true
+			}
+			if mismatch {
 				// The file was not present locally, but a block was found.
 				// This can happen when a file is moved.
 				// In this case, the block is copied from file A to file B.
@@ -460,18 +427,19 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 					return fmt.Errorf("could not open file %s in %s: %s", relfile, src, err.Error())
 				}
 				rg := fsBlocks.files[fname(relfile)]
+				b := make([]byte, lBlockSize)
 				off := (int64(rblockIdx) - int64(rg[0])) * int64(lBlockSize)
 				n, err := f.ReadAt(b, off)
 				f.Close()
 				if err != io.EOF && err != nil {
 					return fmt.Errorf("could not read file %s in %s: %s", relfile, src, err.Error())
 				}
-				_, err = currFile.WriteAt(b[:n], int64(blockIdx)*int64(lBlockSize))
-				if err != nil {
-					return fmt.Errorf("could not write file %s: %s", filename, err.Error())
-				}
+				fsOPS[filename] = append(fsOPS[filename], &fOP{
+					b:   b[:n],
+					off: fOff,
+				})
+				fOff += int64(n)
 			}
-			blockIdx++
 			if err != nil {
 				return fmt.Errorf("could not read varint: %v", err.Error())
 			}
@@ -479,36 +447,60 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 			if fieldType != typeLengthDelimeted {
 				return fmt.Errorf("expected type: %v, but got: %v", typeLengthDelimeted, fieldType)
 			}
-			if currFile == nil || len(filename) == 0 {
+			if len(filename) == 0 {
 				return errors.New("expected file and filename")
 			}
 			fcontent, err := readBytes(r)
 			if err != nil {
 				return fmt.Errorf("could not read bytes: %v", err.Error())
 			}
-			// Write the file content in the expected offset.
-			_, err = currFile.WriteAt(fcontent, int64(blockIdx)*int64(lBlockSize))
-			if err != io.EOF && err != nil {
-				return fmt.Errorf("could not write file content %s: %s", filename, err.Error())
-			}
+			fsOPS[filename] = append(fsOPS[filename], &fOP{
+				b:   fcontent,
+				off: fOff,
+			})
+			fOff += int64(len(fcontent))
 		case fieldDonePushing:
-			if currFile != nil {
-				currFile.Close()
-				currFile = nil
+			success, _ := readVarint(r)
+			if success != successSig {
+				wrapVarint(failureSig, fieldDonePushing, w)
+				return fmt.Errorf("success check expected %v, but got: %v", successSig, success)
+			}
+			// TODO: Start transaction.
+			for filename, ops := range fsOPS {
+				filepath := path.Join(src, string(filename))
+				dir := path.Dir(filepath)
+				err := os.MkdirAll(dir, os.ModePerm)
+				if err != nil {
+					wrapVarint(failureSig, fieldDonePushing, w)
+					return fmt.Errorf("could not create directory %s: %v", dir, err)
+				}
+				f, err := os.OpenFile(filepath, os.O_RDWR|os.O_CREATE, os.ModePerm)
+				if err != nil {
+					wrapVarint(failureSig, fieldDonePushing, w)
+					return fmt.Errorf("could not create file %s: %v", filepath, err)
+				}
+				for _, op := range ops {
+					_, err := f.WriteAt(op.b, op.off)
+					if err != nil {
+						f.Close()
+						wrapVarint(failureSig, fieldDonePushing, w)
+						return fmt.Errorf("could not write file %s: %v", filepath, err)
+					}
+				}
+				f.Close()
 			}
 			// Delete files that are present locally, but were not sent by the peer.
 			for filename := range fsBlocks.files {
-				if _, ok := fSent[filename]; !ok {
+				if _, ok := fsOPS[filename]; !ok {
 					err := os.Remove(path.Join(src, string(filename)))
 					if err != nil {
+						wrapVarint(failureSig, fieldDonePushing, w)
 						return fmt.Errorf("could not delete file %s: %s", filename, err.Error())
 					}
 				}
 			}
-			success, _ := readVarint(r)
-			if success != successSig {
-				return fmt.Errorf("success check expected %v, but got: %v", successSig, success)
-			}
+			// TODO: end transaction.
+
 			// Notify success to the peer.
 			return wrapVarint(successSig, fieldDonePushing, w)
 		default:

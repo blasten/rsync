@@ -603,16 +603,18 @@ func TestRsync(t *testing.T) {
 		t.Error(err)
 	}
 	for _, entry := range entries {
-		srcDir := path.Join(testDataDir, entry.Name(), "src")
-		currDir := path.Join(testDataDir, entry.Name(), "dest")
-		destDir, err := os.MkdirTemp(t.TempDir(), "dest")
-		if err != nil {
-			t.Error(err)
-		}
-		if err := copyFiles(currDir, destDir); err != nil {
-			t.Error(err)
-		}
-		compareDir(srcDir, destDir /*blockSize=*/, 10, t)
+		t.Run("TestData"+entry.Name(), func(t *testing.T) {
+			srcDir := path.Join(testDataDir, entry.Name(), "src")
+			currDir := path.Join(testDataDir, entry.Name(), "dest")
+			destDir, err := os.MkdirTemp(t.TempDir(), "dest")
+			if err != nil {
+				t.Error(err)
+			}
+			if err := copyFiles(currDir, destDir); err != nil {
+				t.Error(err)
+			}
+			compareDir(srcDir, destDir /*blockSize=*/, 10, t)
+		})
 	}
 }
 
@@ -660,14 +662,12 @@ func compareDir(src, dest string, blockSize uint32, t *testing.T) {
 	peer2r, peer2w := io.Pipe()
 
 	var wg = sync.WaitGroup{}
-	errCh := make(chan error, 1)
-	doneCh := make(chan struct{}, 1)
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		if err := push(peer2r, peer1w, src); err != nil {
-			errCh <- fmt.Errorf("push failed: %v", err.Error())
+			t.Errorf("push failed: %v", err.Error())
 		}
 	}()
 
@@ -675,21 +675,11 @@ func compareDir(src, dest string, blockSize uint32, t *testing.T) {
 	go func() {
 		defer wg.Done()
 		if err := pull(peer1r, peer2w, dest, blockSize); err != nil {
-			errCh <- fmt.Errorf("pull failed: %v", err.Error())
+			t.Errorf("pull failed: %v", err.Error())
 		}
 	}()
 
-	go func() {
-		wg.Wait()
-		doneCh <- struct{}{}
-	}()
-
-	select {
-	case err := <-errCh:
-		t.Error(err)
-		return
-	case <-doneCh:
-	}
+	wg.Wait()
 
 	got := make(map[string][]byte)
 	recurseDir(dest, "", func(file string, entry os.DirEntry) error {
