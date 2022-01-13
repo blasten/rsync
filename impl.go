@@ -42,6 +42,9 @@ type block struct {
 }
 
 type blockHashes struct {
+	// The byte count in the block.
+	len int
+
 	// The weak rolling checksum that uses adler-32.
 	weak uint32
 
@@ -59,7 +62,16 @@ type fsBlocks struct {
 }
 
 type fOP struct {
+	truncate *fOPTruncate
+	writeAt  *fOPWriteAt
+}
+
+type fOPWriteAt struct {
 	b   []byte
+	off int64
+}
+
+type fOPTruncate struct {
 	off int64
 }
 
@@ -99,6 +111,7 @@ func getFileHashes(basedir, relfile string, blockSize int) []*blockHashes {
 		}
 		s1, s2 := getAdler32Sums(b[:n])
 		blocks[blockIdx] = &blockHashes{
+			len:     n,
 			weak:    s2<<16 | s1,
 			strong:  getMD4Checksum(b[:n]),
 			relfile: relfile,
@@ -368,9 +381,9 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 
 	fsOPS := make(map[fname][]*fOP)
 	// Read response from peer.
-	var blockIdx uint32
 	var filename fname
 	var fOff int64
+	var unaligned bool
 	for {
 		fieldNum, fieldType, err := getValueMeta(r)
 		if err != nil {
@@ -381,6 +394,14 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 			if fieldType != typeLengthDelimeted {
 				return fmt.Errorf("expected type: %v, but got: %v", typeLengthDelimeted, fieldType)
 			}
+			// Truncate the previous file if there was one.
+			if len(filename) > 0 {
+				fsOPS[filename] = append(fsOPS[filename], &fOP{
+					truncate: &fOPTruncate{
+						off: fOff,
+					},
+				})
+			}
 			name, err := readBytes(r)
 			if err != nil {
 				return fmt.Errorf("could not read bytes: %v", err)
@@ -390,8 +411,8 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 				return fmt.Errorf("file already sent: %s", filename)
 			}
 			fsOPS[filename] = []*fOP{}
-			blockIdx = 0
 			fOff = 0
+			unaligned = false
 		case fieldNumberHash:
 			if fieldType != typeVarint {
 				return fmt.Errorf("expected type: %v, but got: %v", typeVarint, fieldType)
@@ -410,14 +431,18 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 			var mismatch bool
 			if rg, ok := fsBlocks.files[fname(filename)]; ok {
 				startBlockIdx, endBlockIdx := rg[0], rg[1]
-				if startBlockIdx+blockIdx != rblockIdx || rblockIdx >= endBlockIdx {
-					mismatch = true
+				currBlockIdx := startBlockIdx + uint32(fOff/int64(lBlockSize))
+				if currBlockIdx != rblockIdx || rblockIdx >= endBlockIdx {
+					// Verify the strong hash, since the index can be different,
+					// but point to a block that has the same strong hash.
+					if !bytes.Equal(fsBlocks.blocks[currBlockIdx].strong, fsBlocks.blocks[rblockIdx].strong) {
+						mismatch = true
+					}
 				}
-				blockIdx++
 			} else {
 				mismatch = true
 			}
-			if mismatch {
+			if mismatch || unaligned {
 				// The file was not present locally, but a block was found.
 				// This can happen when a file is moved.
 				// In this case, the block is copied from file A to file B.
@@ -435,10 +460,14 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 					return fmt.Errorf("could not read file %s in %s: %s", relfile, src, err.Error())
 				}
 				fsOPS[filename] = append(fsOPS[filename], &fOP{
-					b:   b[:n],
-					off: fOff,
+					writeAt: &fOPWriteAt{
+						b:   b[:n],
+						off: fOff,
+					},
 				})
 				fOff += int64(n)
+			} else {
+				fOff += int64(fsBlocks.blocks[rblockIdx].len)
 			}
 			if err != nil {
 				return fmt.Errorf("could not read varint: %v", err.Error())
@@ -455,15 +484,27 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 				return fmt.Errorf("could not read bytes: %v", err.Error())
 			}
 			fsOPS[filename] = append(fsOPS[filename], &fOP{
-				b:   fcontent,
-				off: fOff,
+				writeAt: &fOPWriteAt{
+					b:   fcontent,
+					off: fOff,
+				},
 			})
-			fOff += int64(len(fcontent))
+			flen := len(fcontent)
+			fOff += int64(flen)
+			unaligned = flen%int(lBlockSize) != 0
 		case fieldDonePushing:
 			success, _ := readVarint(r)
 			if success != successSig {
 				wrapVarint(failureSig, fieldDonePushing, w)
 				return fmt.Errorf("success check expected %v, but got: %v", successSig, success)
+			}
+			// Truncate the last file.
+			if len(filename) > 0 {
+				fsOPS[filename] = append(fsOPS[filename], &fOP{
+					truncate: &fOPTruncate{
+						off: fOff,
+					},
+				})
 			}
 			// TODO: Start transaction.
 			for filename, ops := range fsOPS {
@@ -480,14 +521,18 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 					return fmt.Errorf("could not create file %s: %v", filepath, err)
 				}
 				for _, op := range ops {
-					_, err := f.WriteAt(op.b, op.off)
-					if err != nil {
-						f.Close()
-						wrapVarint(failureSig, fieldDonePushing, w)
-						return fmt.Errorf("could not write file %s: %v", filepath, err)
+					if op.writeAt != nil {
+						_, err = f.WriteAt(op.writeAt.b, op.writeAt.off)
+					}
+					if op.truncate != nil {
+						err = f.Truncate(op.truncate.off)
 					}
 				}
 				f.Close()
+				if err != nil {
+					wrapVarint(failureSig, fieldDonePushing, w)
+					return fmt.Errorf("could not perform op on file %s: %v", filepath, err)
+				}
 			}
 			// Delete files that are present locally, but were not sent by the peer.
 			for filename := range fsBlocks.files {

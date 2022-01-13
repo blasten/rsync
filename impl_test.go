@@ -596,25 +596,28 @@ func TestPushPullDelete(t *testing.T) {
 	}
 }
 
-func TestRsync(t *testing.T) {
+func TestRsyncWithTestData(t *testing.T) {
 	testDataDir := "test_data"
 	entries, err := os.ReadDir(testDataDir)
 	if err != nil {
 		t.Error(err)
 	}
 	for _, entry := range entries {
-		t.Run("TestData"+entry.Name(), func(t *testing.T) {
-			srcDir := path.Join(testDataDir, entry.Name(), "src")
-			currDir := path.Join(testDataDir, entry.Name(), "dest")
-			destDir, err := os.MkdirTemp(t.TempDir(), "dest")
-			if err != nil {
-				t.Error(err)
-			}
-			if err := copyFiles(currDir, destDir); err != nil {
-				t.Error(err)
-			}
-			compareDir(srcDir, destDir /*blockSize=*/, 10, t)
-		})
+		for blockSize := uint32(1); blockSize <= 10; blockSize++ {
+			testName := fmt.Sprintf("TestData%s_BlockSize%d", entry.Name(), blockSize)
+			t.Run(testName, func(t *testing.T) {
+				srcDir := path.Join(testDataDir, entry.Name(), "src")
+				currDir := path.Join(testDataDir, entry.Name(), "dest")
+				destDir, err := os.MkdirTemp(t.TempDir(), "dest")
+				if err != nil {
+					t.Error(err)
+				}
+				if err := copyFiles(currDir, destDir); err != nil {
+					t.Error(err)
+				}
+				compareDir(srcDir, destDir, blockSize, t)
+			})
+		}
 	}
 }
 
@@ -710,13 +713,13 @@ func compareDir(src, dest string, blockSize uint32, t *testing.T) {
 	})
 
 	for name := range wanted {
-		t.Logf("wanted file '%s'", name)
+		t.Logf("> wanted file '%s'", name)
 		if _, ok := got[name]; !ok {
 			t.Errorf("expected file '%s', but it was not found.", name)
 		}
 	}
 	for name := range got {
-		t.Logf("got file '%s'", name)
+		t.Logf("< got file '%s'", name)
 		if _, ok := wanted[name]; !ok {
 			t.Errorf("unexpected file '%s'.", name)
 		}
