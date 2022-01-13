@@ -32,7 +32,7 @@ const (
 // An error occurs if the varint cannot be read.
 // This metadata is based on the protocol buffer encoding.
 // https://developers.google.com/protocol-buffers/docs/encoding#structure
-func getValueMeta(r io.Reader) (uint32, wireType, error) {
+func getValueMeta(r io.Reader) (fieldNumber, wireType, error) {
 	v, err := readVarint(r)
 	if err != nil {
 		return 0, 0, err
@@ -45,7 +45,7 @@ func getValueMeta(r io.Reader) (uint32, wireType, error) {
 // wrapVarint wraps a varint in an envelope that contains metadata such
 // as a fieldNum and writes it to the provided writer.
 // The metadata can then be read by using getValueMeta.
-func wrapVarint(v uint32, fieldNum uint32, w io.Writer) error {
+func wrapVarint(v uint32, fieldNum fieldNumber, w io.Writer) error {
 	writeVarint(fieldNum<<3|typeVarint, w)
 	return writeVarint(v, w)
 }
