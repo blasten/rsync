@@ -396,11 +396,20 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 			}
 			// Truncate the previous file if there was one.
 			if len(filename) > 0 {
-				fsOPS[filename] = append(fsOPS[filename], &fOP{
-					truncate: &fOPTruncate{
-						off: fOff,
-					},
-				})
+				needsTruncate := true
+				if rg, ok := fsBlocks.files[fname(filename)]; ok {
+					currFilesize := int64((rg[1]-1)*lBlockSize + uint32(fsBlocks.blocks[rg[0]+rg[1]-1].len))
+					if currFilesize == fOff {
+						needsTruncate = false
+					}
+				}
+				if needsTruncate {
+					fsOPS[filename] = append(fsOPS[filename], &fOP{
+						truncate: &fOPTruncate{
+							off: fOff,
+						},
+					})
+				}
 			}
 			name, err := readBytes(r)
 			if err != nil {
@@ -500,11 +509,20 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 			}
 			// Truncate the last file.
 			if len(filename) > 0 {
-				fsOPS[filename] = append(fsOPS[filename], &fOP{
-					truncate: &fOPTruncate{
-						off: fOff,
-					},
-				})
+				needsTruncate := true
+				if rg, ok := fsBlocks.files[fname(filename)]; ok {
+					currFilesize := int64((rg[1]-1)*lBlockSize + uint32(fsBlocks.blocks[rg[0]+rg[1]-1].len))
+					if currFilesize == fOff {
+						needsTruncate = false
+					}
+				}
+				if needsTruncate {
+					fsOPS[filename] = append(fsOPS[filename], &fOP{
+						truncate: &fOPTruncate{
+							off: fOff,
+						},
+					})
+				}
 			}
 			// TODO: Start transaction.
 			for filename, ops := range fsOPS {
@@ -527,12 +545,12 @@ func pull(r io.Reader, w io.Writer, src string, lBlockSize uint32) error {
 					if op.truncate != nil {
 						err = f.Truncate(op.truncate.off)
 					}
+					if err != nil {
+						wrapVarint(failureSig, fieldDonePushing, w)
+						return fmt.Errorf("could not perform op on file %s: %v", filepath, err)
+					}
 				}
 				f.Close()
-				if err != nil {
-					wrapVarint(failureSig, fieldDonePushing, w)
-					return fmt.Errorf("could not perform op on file %s: %v", filepath, err)
-				}
 			}
 			// Delete files that are present locally, but were not sent by the peer.
 			for filename := range fsBlocks.files {
